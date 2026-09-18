@@ -55,13 +55,13 @@ class _V8QueryCache:
             self.hits += 1
             return entry["value"]
 
-    def put(self, key: str, value: list, size_bytes: int = 0):
+    def put(self, key: str, value: list):
         with self._lock:
             if key in self._cache:
                 del self._cache[key]
             while len(self._cache) >= self._max_entries:
                 self._cache.popitem(last=False)
-            self._cache[key] = {"value": value, "created": time.time(), "size": size_bytes}
+            self._cache[key] = {"value": value, "created": time.time()}
 
     def invalidate_file(self, file_path: str):
         with self._lock:

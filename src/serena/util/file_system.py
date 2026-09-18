@@ -40,12 +40,9 @@ def scan_directory(
     is_ignored_file: Callable[[str], bool] | None = None,
 ) -> ScanResult:
     """
-    :param path: the path to scan
-    :param recursive: whether to recursively scan subdirectories
-    :param relative_to: the path to which the results should be relative to; if None, provide absolute paths
-    :param is_ignored_dir: a function with which to determine whether the given directory (abs. path) shall be ignored
-    :param is_ignored_file: a function with which to determine whether the given file (abs. path) shall be ignored
-    :return: the list of directories and files
+    Scan directory with V8 safety:
+    - Don't follow symlinks
+    - Exclude .git, node_modules, .next-build, etc.
     """
     if is_ignored_file is None:
         is_ignored_file = lambda x: False
@@ -58,11 +55,19 @@ def scan_directory(
     abs_path = os.path.abspath(path)
     rel_base = os.path.abspath(relative_to) if relative_to else None
 
+    # V8: Exclude patterns
+    V8_EXCLUDED_DIRS = {'.git', '__pycache__', 'node_modules', '.next', '.next-build', 
+                        'dist', 'build', '.cache', '.turbo', '.venv', 'venv'}
+
     try:
         with os.scandir(abs_path) as entries:
             for entry in entries:
                 try:
                     entry_path = entry.path
+
+                    # V8: Skip symlinks
+                    if entry.is_symlink():
+                        continue
 
                     if rel_base:
                         try:
@@ -73,10 +78,15 @@ def scan_directory(
                     else:
                         result_path = entry_path
 
-                    if entry.is_file():
+                    # V8: Skip excluded dirs
+                    entry_name = entry.name
+                    if entry_name in V8_EXCLUDED_DIRS:
+                        continue
+
+                    if entry.is_file(follow_symlinks=False):
                         if not is_ignored_file(entry_path):
                             files.append(result_path)
-                    elif entry.is_dir():
+                    elif entry.is_dir(follow_symlinks=False):
                         if not is_ignored_dir(entry_path):
                             directories.append(result_path)
                             if recursive:
@@ -90,12 +100,17 @@ def scan_directory(
                                 files.extend(sub_result.files)
                                 directories.extend(sub_result.directories)
                 except PermissionError as ex:
-                    # Skip files/directories that cannot be accessed due to permission issues
                     log.debug(f"Skipping entry due to permission error: {entry.path}", exc_info=ex)
                     continue
+                except OSError as ex:
+                    # V8: Handle "Too many levels of symbolic links"
+                    log.debug(f"Skipping entry due to OS error: {entry.path}: {ex}")
+                    continue
     except PermissionError as ex:
-        # Skip the entire directory if it cannot be accessed
         log.debug(f"Skipping directory due to permission error: {abs_path}", exc_info=ex)
+        return ScanResult([], [])
+    except OSError as ex:
+        log.debug(f"Skipping directory due to OS error: {abs_path}: {ex}")
         return ScanResult([], [])
 
     return ScanResult(directories, files)
