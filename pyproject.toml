@@ -3,7 +3,7 @@ build-backend = "hatchling.build"
 requires = ["hatchling"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/serena"]
+packages = ["src/serena", "src/serena_v8"]
 
 [project]
 name = "serena-v8"
