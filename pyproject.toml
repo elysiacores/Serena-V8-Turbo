@@ -58,3 +58,6 @@ dev = [
 serena = "serena.cli:top_level"
 serena-agent = "serena.cli:top_level"
 serena-hooks = "serena.hooks:hook_commands"
+serena-v8 = "serena.cli:top_level"
+serena-v8-daemon = "serena_v8.core_daemon:daemon_main"
+serena-v8-adapter = "serena_v8.core_daemon:adapter_main"
