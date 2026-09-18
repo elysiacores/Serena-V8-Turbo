@@ -56,7 +56,7 @@ def scan_directory(
     rel_base = os.path.abspath(relative_to) if relative_to else None
 
     # V8: Exclude patterns
-    V8_EXCLUDED_DIRS = {'.git', '__pycache__', 'node_modules', '.next', '.next-build', 
+    V8_EXCLUDED_DIRS = {'.git', '__pycache__', '.next', '.next-build', 
                         'dist', 'build', '.cache', '.turbo', '.venv', 'venv'}
 
     try:
