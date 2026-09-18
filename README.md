@@ -1,306 +1,262 @@
-# Serena V8 — Next-Generation Semantic Coding Runtime
+# Serena V8
 
-> Drop-in replacement for [Serena](https://github.com/oraios/serena) — install once, use immediately. No need to install Serena first.
+High-performance, drop-in replacement for [Serena](https://github.com/oraios/serena) — the semantic coding agent runtime.
 
----
+V8 is **not** a wrapper. It is an **overlay** that installs directly into the serena-agent package, replacing the runtime while preserving all original tools, CLI commands, and MCP protocol compatibility.
 
-## What V8 Improves Over Serena
+## ⚡ Performance
 
-| Capability | Serena Original | V8 |
-|------------|----------------|-----|
-| Symbol search (find_symbol) | ~2.5s every time | ~0.005s after first call |
-| Result caching | ❌ None | ✅ TTL 30min, 500 entries |
-| LSP crash recovery | ❌ Manual restart | ✅ Auto-restart < 3s |
-| LSP memory management | ❌ Unbounded | ✅ Idle eviction + alerts |
-| Performance tracking | ❌ None | ✅ P50/P95/P99 per stage |
-| Persistent symbol index | ❌ None | ✅ SQLite, survives restarts |
-| Composite tools | ❌ None | ✅ 1 call replaces 3-4 calls |
+| Metric | Serena 1.7.0 | Serena V8 |
+|--------|-------------|-----------|
+| Cold `find_symbol` | ~2800ms | ~60ms |
+| Warm `find_symbol` | ~2800ms | ~4-5ms |
+| Cache hit rate | 0% | 85%+ |
+| Warm call overhead | ~2.7s | ~4ms |
+| **Improvement** | — | **99.7%** |
 
----
+## 🛠️ What V8 Fixes (Production Bug Fixes)
 
-## Installation
+### 1. LSP Document Synchronization
+**Problem:** After file edits, LSP still holds stale symbol locations → `rename_symbol` edits the wrong line.
+**Fix:** `LSPDocumentSync` notifies LSP of file changes before responding.
 
-### Method 1: pip (recommended)
+### 2. Cache Invalidation
+**Problem:** V8 symbol cache returns stale results after edits.
+**Fix:** `CacheInvalidator` clears symbol/query cache for edited files immediately.
+
+### 3. Rename Safety Guard
+**Problem:** Stale cached locations cause edits to wrong symbols.
+**Fix:** `SafetyGuard` verifies symbol name at cached location before rename/delete. Aborts with clear error on mismatch.
+
+### 4. Symlink Loop Prevention
+**Problem:** `find_file` crashes with "Too many levels of symbolic links" on `.next-build/standalone/node_modules/node_modules/...`.
+**Fix:** `scan_directory` uses `follow_symlinks=False` + excludes build artifacts.
+
+### 5. Node PATH for Systemd
+**Problem:** Systemd services don't load `.bashrc` → Node not in PATH → LSP (svelte/typescript) fails to start → tunnel crash loop.
+**Fix:** `Environment="PATH=..."` in service files + `node/npm/npx` symlinks to `~/.local/bin`.
+
+### 6. Circular Import Fix
+**Problem:** `__init__.py` → `lsp_sync` → `symbol` → `__init__` → tunnel crashes on startup.
+**Fix:** Lazy imports — `lsp_sync` loaded after `serena` module initializes.
+
+## 📦 What V8 Adds (10 Phases + Hotfixes)
+
+| Phase | Feature |
+|-------|---------|
+| 1 | Runtime identity (`v8-phase1`) + telemetry |
+| 2 | Core Daemon — persistent runtime, unix socket |
+| 3 | Smart Scheduler — lanes, single-flight, composite tools |
+| 4 | Persistent Symbol Index — SQLite + FTS5 + incremental watcher |
+| 5 | LSP Lifecycle Manager — auto-restart, idle eviction, memory pressure |
+| 6 | Multi-Tier Cache — L1 memory → L2 disk → L3 LSP |
+| 7 | Pipe/502 Hardening — bounded log, drain, watchdog, backpressure |
+| 8 | Profiler — P50/P95/P99 per request stage |
+| 9 | Hotspot Optimization — compact JSON, field filter, lazy body |
+| 10 | Integration Test — 9/9 PASS |
+| 8.5 | Correctness Fixes — LSP sync + cache invalidation + safety guard |
+
+## 🚀 Installation
+
+### Quick Install (Overlay on serena-agent)
+
 ```bash
-pip install git+https://github.com/elysiacores/serena-v8.git
-```
+# 1. Install serena-agent (if not already)
+uv tool install serena-agent
 
-### Method 2: uv (faster)
-```bash
-uv pip install git+https://github.com/elysiacores/serena-v8.git
-```
-
-### Method 3: Development (editable)
-```bash
+# 2. Clone V8
 git clone https://github.com/elysiacores/serena-v8.git
 cd serena-v8
-pip install -e .
+
+# 3. Copy V8 over serena-agent
+SERENA_SITE=$(python -c "import serena; import os; print(os.path.dirname(serena.__file__))")
+cp -r src/serena/* "$SERENA_SITE/"
+cp -r src/serena_v8 "$SERENA_SITE/../"
+
+# 4. Create node symlinks (if using svelte/typescript LSP)
+ln -sf $(which node) ~/.local/bin/node
+ln -sf $(which npm) ~/.local/bin/npm
+
+# 5. Verify
+serena --version  # → Serena 8.0.0-dev.1
 ```
 
-> **Important:** ❌ **Do NOT install Serena first** — V8 includes everything (solidlsp, interprompt, etc.)  
-> ❌ **No extra configuration needed** — Use the exact same commands as Serena
+### Standalone Tunnel + V8 (Production)
 
----
-
-## Usage
-
-### Same Commands as Serena (drop-in replacement)
 ```bash
-# Start MCP server
-serena start-mcp-server --project /path/to/project
+# Create tunnel profile
+cat > ~/.config/tunnel-client/my-project.yaml << EOF
+admin_ui:
+  open_browser: false
+config_version: 1
+control_plane:
+  api_key: file:~/.config/agent-secrets/my-project-api-key
+  base_url: https://api.openai.com
+  tunnel_id: tunnel_xxxx
+health:
+  listen_addr: 0.0.0.0:8787
+log:
+  level: info
+mcp:
+  commands:
+    default:
+      command: /home/user/.local/bin/serena start-mcp-server --transport stdio --project /path/to/project --tool-timeout 100 --log-level WARNING --context desktop-app
+EOF
 
-# Use with tunnel-client (in config)
-command: "serena start-mcp-server --project /path/to/project"
+# Create systemd service
+cat > ~/.config/systemd/user/my-project-tunnel.service << EOF
+[Unit]
+Description=My Project Tunnel
+After=network.target
 
-# Check version
+[Service]
+Type=simple
+ExecStart=/home/user/.local/bin/tunnel-client run --profile my-project
+Restart=always
+RestartSec=10
+MemoryMax=512M
+CPUQuota=50%
+Environment="PATH=/home/user/.hermes/node/bin:/home/user/.local/bin:/home/user/.local/share/uv/tools/serena-agent/bin:/usr/local/bin:/usr/bin:/bin"
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable + start
+systemctl --user daemon-reload
+systemctl --user enable --now my-project-tunnel.service
+```
+
+## 🔧 Configuration
+
+### Global Config (`~/.serena/serena_config.yml`)
+
+```yaml
+language_backend: LSP
+tool_timeout: 100
+gui_log_window: false
+web_dashboard: false
+```
+
+### Project Config (`<project>/.serena/project.yml`)
+
+```yaml
+language_servers:
+  - svelte  # or typescript, go, etc.
+
+# IMPORTANT: Set to false for V8 to see node_modules
+ignore_all_files_in_gitignore: false
+
+# Exclude heavy build artifacts
+ignored_paths:
+  - "**/.next*/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/.cache/**"
+  - "**/vendor/**"
+```
+
+### Tunnel Service File
+
+**Critical:** Must include `Environment="PATH=..."` with node + serena paths:
+
+```ini
+[Service]
+Environment="PATH=/home/user/.hermes/node/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
+```
+
+Without this, LSP (svelte/typescript) fails to find `node` → tunnel crash loop.
+
+## 🔍 Checking V8 Status
+
+```bash
+# Version
 serena --version
-# → 8.0.0-dev.1
+# → Serena 8.0.0-dev.1
 
-# Check V8 status
-serena-v8 status
+# Runtime identity
+python -c "import serena; print(serena.get_v8_identity())"
 
-# View stats
+# Cache/metrics stats
 cat ~/.serena-v8/stats.json
+
+# Watchdog status
+cat ~/.serena-v8/watchdog-status.json
 ```
 
-### Example Stats Output
-```json
-{
-  "timestamp": 1789725324.638,
-  "projects": {
-    "/home/user/project": {
-      "cache_entries": 42,
-      "requests": 128,
-      "p50_ms": 230.0,
-      "p95_ms": 445.38,
-      "errors": 0
-    }
-  }
-}
+## 📊 Monitoring
+
+### Watchdog (Auto-Restart)
+
+V8 includes `workspace-watchdog-v8.py` — monitors tunnels every 30s, auto-restarts on failure, collects logs:
+
+```bash
+python3 ~/SuperProjects/workspace-watchdog-v8.py &
 ```
 
----
+### Logs
 
-## V8 Architecture
+```bash
+# Tunnel logs
+journalctl --user -u my-project-tunnel.service -f
+
+# Serena MCP logs
+ls ~/.serena/logs/
+
+# Watchdog logs
+cat ~/.serena-v8/logs/watchdog.log
+```
+
+## ⚠️ Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `node is not installed or isn't in PATH` | Systemd service missing PATH | Add `Environment="PATH=..."` to service file |
+| `Failed to start language server: svelte` | Node not in PATH for LSP | `ln -sf $(which node) ~/.local/bin/node` |
+| `Too many levels of symbolic links` | `scan_directory` follows symlinks | Fixed in V8 — `follow_symlinks=False` |
+| `rename_symbol` edits wrong line | LSP has stale file version | Fixed in V8 — LSP sync + cache invalidation |
+| Tunnel crash loop | Circular import in `__init__.py` | Fixed in V8 — lazy imports |
+| `find_symbol` slow (2-3s) | V8 cache not loading | Check `~/.serena-v8/stats.json` — should show hits > 0 |
+| `server/discover` pydantic error | Protocol mismatch (old wrapper script) | Use `serena start-mcp-server` directly, not wrapper |
+
+## 🏗️ Architecture
 
 ```
 ChatGPT / Hermes / Claude
         │
         ▼
-┌─────────────────┐
-│ MCP Tunnel      │  ← Already exists, no changes needed
-│ (tunnel-client) │
-└────────┬────────┘
-         │ stdio
-         ▼
-┌─────────────────┐
-│ V8 Core Daemon  │  ← Added by V8 (persistent, reuses LSP)
-│ - Project state │
-│ - Symbol index  │
-│ - Cache (L1→L2) │
-│ - LSP lifecycle │
-└────────┬────────┘
-         │
-    ┌────┴────┐
-    │         │
-    ▼         ▼
-┌───────┐ ┌───────────┐
-│ LSP   │ │ SQLite    │
-│ Pool  │ │ Index     │
-└───────┘ └───────────┘
+   MCP Tunnel (8787-8791)
+        │
+        ▼
+  tunnel-client (stdio)
+        │
+        ▼
+   serena __init__.py
+        │
+        ├── V8 Runtime (identity, telemetry, cache)
+        ├── V8 LSP Sync (document notify + cache invalidate)
+        └── Serena 1.7.0 base (patched with V8)
+                │
+                ├── LSP Manager (auto-restart, idle eviction)
+                ├── Symbol Cache (TTL + LRU)
+                ├── Smart Scheduler (lanes, single-flight)
+                └── 36 tools (find_symbol, rename, edit, diagnostics...)
 ```
+
+## 📝 License
+
+MIT (same as Serena upstream)
+
+## 🤖 AI Agent Notes
+
+**For AI agents using Serena V8 through MCP:**
+
+1. Always call `initial_instructions` first
+2. After any file edit (create/replace/insert), the next tool call will get fresh LSP data automatically
+3. `rename_symbol` now validates location before editing — if it fails, read the file first to get current content
+4. `find_symbol` is cached — repeated queries return in ~4ms
+5. If `find_file` returns "Too many levels of symbolic links", check for symlinks in build directories
 
 ---
 
-## V8 Configuration Files
-
-| File | Purpose |
-|------|---------|
-| `~/.serena-v8/stats.json` | Runtime stats (written every 10s) |
-| `~/.serena-v8/symbol_index.db` | Persistent symbol index (SQLite) |
-| `~/.serena-v8/cache.db` | Search result cache (SQLite) |
-| `~/.serena-v8/daemon.sock` | V8 Core Daemon (unix socket) |
-
----
-
-## Migrating from Serena to V8
-
-### If you already have Serena installed
-```bash
-# 1. Uninstall Serena (optional)
-pip uninstall serena-agent
-
-# 2. Install V8
-pip install git+https://github.com/elysiacores/serena-v8.git
-
-# 3. Verify
-serena --version
-# → 8.0.0-dev.1 ← Success!
-
-# 4. Your tunnel configs work unchanged — no edits needed
-```
-
-### Fresh install
-```bash
-pip install git+https://github.com/elysiacores/serena-v8.git
-# Ready to use — no configuration needed
-```
-
----
-
-## Testing
-
-```bash
-# Test V8 runtime loads
-python3 -c "
-import serena
-print(f'Version: {serena.__version__}')
-print(f'V8 Identity: {serena.get_v8_identity()}')
-"
-
-# Test query cache
-python3 -c "
-from serena.symbol import _v8_symbol_cache
-_v8_symbol_cache.put('test', ['symbol1'])
-print(f'Cache hit: {_v8_symbol_cache.get(\"test\")}')
-print(f'Stats: {_v8_symbol_cache.stats()}')
-"
-
-# Test LSP Manager
-python3 -c "
-from serena_v8.lsp_manager import LSPLifecycleManager
-mgr = LSPLifecycleManager()
-mgr.register('/proj', 'go', ['gopls', 'serve'])
-print(mgr.stats())
-"
-
-# Test Multi-Tier Cache
-python3 -c "
-from serena_v8.cache import MultiTierCache
-cache = MultiTierCache()
-cache.put('/proj', 'find_symbol', {'name': 'App'}, {'result': 'ok'})
-result, tier = cache.get('/proj', 'find_symbol', {'name': 'App'})
-print(f'Tier: {tier}, Result: {result}')
-"
-```
-
----
-
-## Benchmarking
-
-```bash
-# Run benchmarks
-python3 benchmarks/v8_benchmark.py --project /path/to/project --mode all
-
-# View results
-cat benchmarks/results/*.json
-```
-
----
-
-## Troubleshooting
-
-For full troubleshooting guide with AI-agent-friendly diagnostics, see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
-
-Quick fixes:
-
-### Issue: `serena --version` still shows 1.7.0
-Fix: Reinstall V8:
-```bash
-pip install git+https://github.com/elysiacores/serena-v8.git
-```
-
-### Issue: `ModuleNotFoundError: serena_v8`
-Fix: V8 runtime not loaded. Try:
-```bash
-pip install -e ~/Projects/serena-v8-fork
-```
-
-### Issue: tunnel config not switching to V8
-Fix: Update tunnel-client config to use `serena` (from V8):
-```yaml
-mcp:
-  commands:
-    - command: "serena start-mcp-server --project /path"
-```
-
-### Issue: Stats file is empty
-Fix: Stats are written every 10s. Wait and check again:
-```bash
-cat ~/.serena-v8/stats.json
-```
-
----
-
-## Development
-
-```bash
-# Clone
-git clone https://github.com/elysiacores/serena-v8.git
-cd serena-v8
-
-# Install in dev mode
-pip install -e ".[dev]"
-
-# Run tests
-pytest tests/
-
-# Run benchmarks
-python3 benchmarks/v8_benchmark.py --project /path/to/project
-```
-
----
-
-## Project Structure
-
-```
-serena-v8/
-├── src/
-│   ├── serena/              # Core Serena + V8 patches
-│   │   ├── __init__.py      # V8 version identity
-│   │   ├── symbol.py        # + V8 query cache hooks
-│   │   ├── v8_runtime.py    # V8 telemetry, cache, memory
-│   │   └── tools/           # Tool classes
-│   ├── serena_v8/           # V8-specific components
-│   │   ├── core_daemon.py   # Persistent core daemon
-│   │   ├── scheduler.py     # Smart request scheduler
-│   │   ├── index.py         # Persistent symbol index
-│   │   ├── lsp_manager.py   # LSP lifecycle manager
-│   │   └── cache.py         # Multi-tier cache
-│   ├── solidlsp/            # LSP protocol handler
-│   └── interprompt/         # Prompt templates
-├── benchmarks/
-│   └── v8_benchmark.py      # Benchmark harness
-├── pyproject.toml
-└── README.md
-```
-
----
-
-## Performance Targets
-
-| Metric | Target |
-|--------|--------|
-| `get_current_config` | < 10ms |
-| `list_dir` | < 20ms |
-| `read_file` | < 20ms |
-| Indexed `find_symbol` | < 50ms |
-| `find_symbol + body` | < 100ms |
-| `search_for_pattern` | < 150ms |
-| Semantic/LSP queries | < 300ms warm |
-| `find_referencing_symbols` | < 800ms P95 |
-| Stress (1000 calls) | 0 timeouts, 0 crashes |
-
----
-
-## License
-
-MIT (compatible with MIT portions of Serena)
-
----
-
-## Links
-
-- Original Serena: https://github.com/oraios/serena
-- V8 Repository: https://github.com/elysiacores/serena-v8
-- Issue Tracker: https://github.com/elysiacores/serena-v8/issues
+**GitHub:** https://github.com/elysiacores/serena-v8
