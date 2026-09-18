@@ -1,0 +1,60 @@
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/serena"]
+
+[project]
+name = "serena-v8"
+version = "8.0.0a1"
+description = "Serena V8 — Performance & Stability Fork"
+authors = [{ name = "Nut Werayoot", email = "elysia.cores@gmail.com" }]
+readme = "README.md"
+requires-python = ">=3.11, <3.15"
+license = "MIT"
+dependencies = [
+  "requests==2.33.0",
+  "python-dotenv==1.2.2",
+  "mcp==1.28.1",
+  "sensai-utils==1.5.0",
+  "pydantic==2.12.5",
+  "pyyaml==6.0.2",
+  "jinja2==3.1.6",
+  "psutil==7.0.0",
+  "docstring_parser==0.17.0",
+  "joblib==1.5.1",
+  "tqdm==4.67.1",
+  "tiktoken==0.12.0",
+  "beautifulsoup4==4.14.2",
+  "pygls==2.1.1",
+  "lsprotocol==2025.0.0",
+  "urllib3==2.7.0",
+  "werkzeug==3.1.7",
+  "starlette==1.3.1",
+  "python-multipart==0.0.31",
+  "filelock==3.25.2",
+  "cryptography==50.0.0",
+  "regex==2026.2.28",
+  "ruamel.yaml==0.18.14",
+  "anthropic==0.117.0",
+  "pywebview==6.2",
+  "pystray==0.19.5",
+  "flask==3.1.3",
+  "overrides==7.7.0",
+  "pathspec==0.12.1",
+  "types-pyyaml==6.0.12.20250516",
+  "oslex==2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.4.1",
+  "pytest-xdist==3.8.0",
+  "ruff==0.12.5",
+]
+
+[project.scripts]
+serena = "serena.cli:top_level"
+serena-agent = "serena.cli:top_level"
+serena-hooks = "serena.hooks:hook_commands"
