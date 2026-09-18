@@ -200,6 +200,10 @@ cat benchmarks/results/*.json
 
 ## Troubleshooting
 
+For full troubleshooting guide with AI-agent-friendly diagnostics, see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
+
+Quick fixes:
+
 ### Issue: `serena --version` still shows 1.7.0
 Fix: Reinstall V8:
 ```bash
