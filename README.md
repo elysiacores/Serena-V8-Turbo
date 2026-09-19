@@ -4,32 +4,32 @@ High-performance, drop-in replacement for [Serena](https://github.com/oraios/ser
 
 V8 is **not** a wrapper. It is an **overlay** that installs directly into the serena-agent package, replacing the runtime while preserving all original tools, CLI commands, and MCP protocol compatibility.
 
-## 📊 Serena เดิม vs Serena V8
+## 📊 Serena vs Serena V8
 
-V8 เป็น **drop-in overlay** บน Serena เดิม ไม่ได้เปลี่ยน MCP protocol หรือทำ wrapper ใหม่ จึงยังใช้คำสั่งเดิมและเครื่องมือเดิมได้ทั้งหมด
+V8 is a **drop-in overlay** on Serena. It preserves the existing MCP protocol, CLI commands, and tool registry rather than introducing a separate wrapper.
 
-| ด้าน | Serena เดิม | Serena V8 ที่ใช้งานจริง |
+| Area | Original Serena | Serena V8 in production |
 |---|---|---|
-| MCP launch | Serena process ปกติ | คำสั่งเดิม `serena start-mcp-server --transport stdio` |
-| Tools | เครื่องมือ Serena เดิม | เครื่องมือเดิมครบ **36 tools** + instrumentation กลาง |
-| Telemetry | ไม่มี live per-workspace snapshot ที่เชื่อถือได้ | async telemetry แยกไฟล์ต่อ Workspace พร้อม latency/error/timeout |
-| Cache | cache เดิมและ invalidation กว้าง/ไม่แยก Workspace | canonical project identity + invalidation เฉพาะ Workspace หลัง edit |
-| หลังแก้ไฟล์ | มีความเสี่ยง LSP/symbol location เก่า | sync LSP ก่อน query ถัดไป และมี safety validation |
-| Concurrency | task executor เดิม | bounded lanes, queue backpressure, single-flight read, write serialization |
-| LSP startup | เริ่มเมื่อถูกเรียกใช้งาน | prewarm ก่อน MCP readiness และ reuse native Serena manager |
-| Symlink/build tree | เสี่ยง scan dependency/build tree และ symlink loop | ไม่ follow symlink directory และ exclude dependency/build output จาก walker |
-| Memory | ไม่มี policy กลางต่อ Tunnel | `MemoryHigh=1.4G`, `MemoryMax=2G` ต่อ Tunnel |
-| Monitoring | ดู process/port อาจไม่พอ | ตรวจ service, port, MCP, metrics, OOM, functional MCP probe และ auth state |
-| Auth failure | อาจถูกมองเป็น service failure | แยกเป็น `AUTH_BLOCKED` และไม่ restart วนซ้ำ |
+| MCP launch | Standard Serena process | Same `serena start-mcp-server --transport stdio` command |
+| Tools | Original Serena tools | All **36 tools** plus central instrumentation |
+| Telemetry | No reliable live per-workspace snapshot | Asynchronous per-workspace telemetry with latency, error, and timeout metrics |
+| Cache | Broad invalidation without consistent workspace isolation | Canonical project identity with workspace-scoped invalidation after edits |
+| After file edits | Risk of stale LSP/symbol locations | LSP synchronization before subsequent semantic queries plus safety validation |
+| Concurrency | Original task executor behavior | Bounded lanes, queue backpressure, single-flight reads, serialized writes |
+| LSP startup | Starts when first needed | Prewarmed before MCP readiness and reused through Serena's native manager |
+| Symlink/build trees | Risk of scanning dependency/build trees and symlink loops | Symlink directories are not followed; dependency/build output is excluded from the walker |
+| Memory | No unified per-tunnel policy | `MemoryHigh=1.4G`, `MemoryMax=2G` per tunnel |
+| Monitoring | Process/port checks may be insufficient | Service, port, MCP, metrics, OOM, functional MCP probe, and auth-state checks |
+| Auth failures | Can look like a service failure | Classified as `AUTH_BLOCKED` without repeated restart loops |
 
 ### Performance measurement policy
 
-ตัวเลขควรแยกตามชั้น เพราะ cold LSP startup กับ warm tool dispatch เป็นคนละต้นทุน และผลขึ้นกับภาษา/ขนาด Workspace:
+Benchmarks separate cold LSP startup from warm tool dispatch because they are different costs and depend on language servers and workspace size:
 
-- **Cold MCP initialization with normal V8 prewarm:** `tummun` วัดได้ประมาณ **2,220 ms**; หลังพร้อมใช้งาน first `list_dir` ประมาณ **8 ms**
-- **Warm MCP tool dispatch (standardized probe mode):** วัด `list_dir` 5 รอบต่อ Workspace โดยใช้ production overlay, JSON-RPC stdio จริง และไม่รวม LSP prewarm ของ probe เพื่อไม่สร้าง LSP ซ้ำ
+- **Cold MCP initialization with normal V8 prewarm:** `tummun` measured approximately **2,220 ms**; the first `list_dir` after readiness took approximately **8 ms**.
+- **Warm MCP tool dispatch (standardized probe mode):** `list_dir` was measured for 5 rounds per workspace using the production overlay and real JSON-RPC stdio. The probe excludes LSP prewarm so it does not create duplicate LSP processes.
 
-| Workspace | Tools | Warm `list_dir` min | median | average | max |
+| Workspace | Tools | Warm `list_dir` min | Median | Average | Max |
 |---|---:|---:|---:|---:|---:|
 | inspi365 | 36 | 5.22 ms | 6.76 ms | 7.57 ms | 12.78 ms |
 | TP | 36 | 5.67 ms | 6.80 ms | 8.68 ms | 15.26 ms |
@@ -37,7 +37,7 @@ V8 เป็น **drop-in overlay** บน Serena เดิม ไม่ได�
 | Makinni | 36 | 3.40 ms | 3.96 ms | 4.72 ms | 8.42 ms |
 | TPOS | 36 | 14.05 ms | 23.15 ms | 21.51 ms | 29.84 ms |
 
-ตัวเลขนี้เป็น **measured production-overlay benchmark** ไม่ใช่ตัวเลขจำลอง และไม่ควรตีความเป็นความเร็วของ semantic query ทุกชนิด โดยเฉพาะ `find_symbol`, references และ diagnostics ที่ขึ้นกับ LSP และ repository state
+These are **measured production-overlay benchmarks**, not synthetic figures. They should not be interpreted as the latency of every semantic query, especially `find_symbol`, references, and diagnostics, which depend on LSP state and repository contents.
 
 
 ## 🛠️ What V8 Fixes (Production Bug Fixes)
@@ -68,7 +68,7 @@ V8 เป็น **drop-in overlay** บน Serena เดิม ไม่ได�
 
 ## 📦 V8 Upgrade Phases
 
-| Phase | Upgrade | สถานะ |
+| Phase | Upgrade | Status |
 |---|---|---|
 | 1 | Runtime identity + async telemetry | **Live** |
 | 2 | Core daemon / Unix socket | Diagnostic/experimental; not used by normal MCP path |
