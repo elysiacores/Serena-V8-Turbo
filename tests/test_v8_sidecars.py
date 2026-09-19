@@ -91,6 +91,9 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(calls[-1]["timeout"], 7)
             runner.cgc_index(path="sample.py")
             self.assertEqual(calls[-1]["timeout"], 11)
+            (Path(root) / "src").mkdir()
+            runner.cgc_index(path="src")
+            self.assertEqual(calls[-1]["timeout"], 90)
             runner.cgc_index(path=".")
             self.assertEqual(calls[-1]["timeout"], 90)
 

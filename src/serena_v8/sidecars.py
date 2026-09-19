@@ -178,7 +178,7 @@ class SidecarRunner:
         command = self._cgc_prefix(db_path) + ("index", str(target), "--no-progress")
         if force:
             command += ("--force",)
-        timeout_ms = self.config.cgc_full_index_timeout_ms if target == Path(self.config.workspace_root) else self.config.cgc_incremental_index_timeout_ms
+        timeout_ms = self.config.cgc_full_index_timeout_ms if target.is_dir() else self.config.cgc_incremental_index_timeout_ms
         return self._run(SidecarKind.CGC, command, timeout_ms=timeout_ms)
 
     def cgc_callers(self, function: str, path: str | None = None) -> SidecarResult:
