@@ -291,7 +291,27 @@ index so callers can submit only those paths for incremental indexing. Full-work
 folders. `ast_grep_rewrite` is preview-only unless `approved=true` is explicitly
 provided; approved single-file rewrites invalidate V8 caches, notify the native
 LSP, request diagnostics, and roll back the file if synchronization or
-diagnostics fails.
+diagnostics fail.
+
+### CGC Health Benchmark
+
+Run the generic end-to-end health check against any Workspace:
+
+```bash
+python benchmarks/cgc_health_benchmark.py \
+  --project /path/to/workspace \
+  --index-path src/example.ts \
+  --function exampleFunction \
+  --query-path src/example.ts \
+  --changed-file src/example.ts
+```
+
+Add `--full` to validate staging promotion and relationship queries while the
+full index is running. Use `--expected-caller` and one or more
+`--expected-callee` options for repository-specific resolution regression
+checks. The harness verifies active tools, job lifecycle, stale detection,
+incremental indexing, query concurrency, process cleanup, and unresolved-call
+counts without embedding a real project path in this repository.
 
 ## 📊 Monitoring
 
