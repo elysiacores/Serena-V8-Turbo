@@ -366,6 +366,10 @@ Default guardrails are intentionally broad enough for variable CI hardware while
 - Python **3.11–3.14**
 - [uv](https://docs.astral.sh/uv/)
 
+No upstream Serena installation is required. The default Python/Jedi semantic backend is installed with the V8 package and is launched from Serena's own Python environment, so it does not depend on a separately installed `jedi-language-server` on `PATH`.
+
+`ast-grep` and CodeGraphContext (CGC) remain optional sidecars: their tools report availability explicitly and do not replace Serena's native semantic authority.
+
 ### Fresh install or upgrade
 
 For a reproducible install, pin the release tag:

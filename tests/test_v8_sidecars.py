@@ -48,7 +48,12 @@ class SidecarRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "sample.ts"
             path.write_text("const value = foo();\n")
-            runner = SidecarRunner(SidecarConfig.from_environment(root, environ={}))
+            def rewrite_executor(command, **_kwargs):
+                if "--update-all" in command:
+                    path.write_text(path.read_text().replace("foo()", "bar()"))
+                return 0, "[]", ""
+
+            runner = SidecarRunner(SidecarConfig.from_environment(root, environ={}), executor=rewrite_executor)
             preview = runner.ast_grep_rewrite("foo()", "bar()", "typescript", ".", False)
             self.assertEqual(preview.status, SidecarStatus.OK)
             self.assertEqual(path.read_text(), "const value = foo();\n")

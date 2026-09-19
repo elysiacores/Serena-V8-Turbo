@@ -3,6 +3,7 @@ Provides Python specific instantiation of the LanguageServer class. Contains var
 """
 
 import logging
+import sys
 import threading
 
 from overrides import override
@@ -13,6 +14,11 @@ from solidlsp.lsp_protocol_handler.server import ProcessLaunchInfo
 from solidlsp.settings import SolidLSPSettings
 
 log = logging.getLogger(__name__)
+
+
+def _jedi_server_command() -> list[str]:
+    """Launch the bundled Jedi language server with Serena's own Python environment."""
+    return [sys.executable, "-c", "from jedi_language_server.cli import cli; cli()"]
 
 
 class JediServer(SolidLanguageServer):
@@ -27,7 +33,7 @@ class JediServer(SolidLanguageServer):
         super().__init__(
             config,
             repository_root_path,
-            ProcessLaunchInfo(cmd="jedi-language-server", cwd=repository_root_path),
+            ProcessLaunchInfo(cmd=_jedi_server_command(), cwd=repository_root_path),
             "python",
             solidlsp_settings,
         )

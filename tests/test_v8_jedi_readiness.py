@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import sys
 import unittest
 from unittest.mock import patch
 
-from solidlsp.language_servers.jedi_server import JediServer
+from solidlsp.language_servers.jedi_server import JediServer, _jedi_server_command
 
 
 class V8JediReadinessTests(unittest.TestCase):
+    def test_jedi_uses_serena_python_environment(self) -> None:
+        command = _jedi_server_command()
+        self.assertEqual(command[0], sys.executable)
+        self.assertIn("jedi_language_server.cli", command[-1])
+
     @staticmethod
     def _server() -> JediServer:
         server = object.__new__(JediServer)
