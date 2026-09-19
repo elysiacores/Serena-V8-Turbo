@@ -35,6 +35,29 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(second.result(timeout=2), "shared")
         self.assertEqual(len(calls), 1)
 
+    def test_same_write_is_not_single_flight(self):
+        scheduler = SmartScheduler({
+            Lane.FAST_READ: LaneConfig(1, 2, 1),
+            Lane.SEMANTIC_READ: LaneConfig(1, 2, 1),
+            Lane.WRITE_REFACTOR: LaneConfig(1, 2, 1),
+        })
+        release = threading.Event()
+        calls = []
+
+        def write():
+            calls.append(1)
+            if len(calls) == 1:
+                release.wait(2)
+            return "written"
+
+        first, first_id = scheduler.submit("replace_content", {"path": "a", "content": "x"}, "/tmp/project", write)
+        second, second_id = scheduler.submit("replace_content", {"path": "a", "content": "x"}, "/tmp/project", write)
+        self.assertNotEqual(first_id, second_id)
+        release.set()
+        self.assertEqual(first.result(timeout=2), "written")
+        self.assertEqual(second.result(timeout=2), "written")
+        self.assertEqual(len(calls), 2)
+
     def test_queue_is_bounded(self):
         scheduler = SmartScheduler({
             Lane.FAST_READ: LaneConfig(1, 1, 1),

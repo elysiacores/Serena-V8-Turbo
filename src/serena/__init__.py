@@ -2,9 +2,11 @@
 Serena V8 — Next-Generation Semantic Coding Runtime
 """
 
-__version__ = "8.0.0-dev.1"
-__build__ = "2026-09-18"
-__commit__ = "v8-phase1"
+from serena_v8._version import BUILD, COMMIT, VERSION
+
+__version__ = VERSION
+__build__ = BUILD
+__commit__ = COMMIT
 
 
 def serena_version() -> str:

@@ -77,6 +77,14 @@ class _V8QueryCache:
             for key in [key for key in self._cache if marker in key]:
                 del self._cache[key]
 
+    def invalidate_project(self, project_root: str) -> None:
+        """Invalidate every cached semantic query for one canonical workspace."""
+        canonical = os.path.realpath(os.path.abspath(project_root))
+        marker = f":{canonical}:"
+        with self._lock:
+            for key in [key for key in self._cache if marker in key]:
+                del self._cache[key]
+
     def clear(self):
         """Clear all projects; reserved for explicit cache reset."""
         with self._lock:
@@ -658,6 +666,9 @@ class LanguageServerSymbolRetriever:
         """
         self._ls_manager: LanguageServerManager = project.get_language_server_manager_or_raise()
         self.project = project
+        # Query caching is safe only when the project exposes the freshness
+        # contract that invalidates cache entries after external edits.
+        self._cache_enabled = callable(getattr(project, "ls_sync_file_system_changes", None))
 
     def _request_info(self, relative_file_path: str, line: int, column: int, file_buffer: LSPFileBuffer | None = None) -> str | None:
         """Retrieves information (in a sanitized format) about the symbol at the desired location,
@@ -829,7 +840,7 @@ class LanguageServerSymbolRetriever:
             substring_matching,
             within_relative_path,
         )
-        cached = _v8_symbol_cache.get(cache_key)
+        cached = _v8_symbol_cache.get(cache_key) if self._cache_enabled else None
         if cached is not None:
             return cached
 
@@ -848,7 +859,8 @@ class LanguageServerSymbolRetriever:
                 )
 
         # V8: Store in cache
-        _v8_symbol_cache.put(cache_key, symbols)
+        if self._cache_enabled:
+            _v8_symbol_cache.put(cache_key, symbols)
         return symbols
 
     def find_unique(
@@ -951,7 +963,7 @@ class LanguageServerSymbolRetriever:
             include_kinds,
             exclude_kinds,
         )
-        cached = _v8_symbol_cache.get(cache_key)
+        cached = _v8_symbol_cache.get(cache_key) if self._cache_enabled else None
         if cached is not None:
             return cached
 
@@ -978,7 +990,8 @@ class LanguageServerSymbolRetriever:
             references = [s for s in references if s.symbol["kind"] not in exclude_kinds]
 
         result = [ReferenceInLanguageServerSymbol.from_lsp_reference(r) for r in references]
-        _v8_symbol_cache.put(cache_key, result)
+        if self._cache_enabled:
+            _v8_symbol_cache.put(cache_key, result)
         return result
 
     def find_implementing_symbols(

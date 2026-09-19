@@ -35,6 +35,7 @@ class SidecarStatus(StrEnum):
     OK = "ok"
     UNAVAILABLE = "unavailable"
     FAILED = "failed"
+    ERROR = "failed"  # compatibility alias used by earlier V8 callers/tests
     TIMEOUT = "timeout"
 
 
@@ -133,6 +134,23 @@ class SidecarRunner:
 
     _query_cache: dict[tuple[str, tuple[str, ...]], tuple[float, SidecarResult]] = {}
     _query_cache_lock = threading.RLock()
+    _cache_max_entries = 128
+    _cache_max_bytes = 16 * 1024 * 1024
+
+    @classmethod
+    def _prune_query_cache(cls) -> None:
+        """Called under the cache lock; expiry is stored per entry, not per reader."""
+        now = time.monotonic()
+        for key, (expires, _) in list(cls._query_cache.items()):
+            if expires <= now:
+                cls._query_cache.pop(key)
+        sizes = {key: len(result.stdout.encode()) + len(result.stderr.encode())
+                 for key, (_, result) in cls._query_cache.items()}
+        total = sum(sizes.values())
+        while cls._query_cache and (len(cls._query_cache) > cls._cache_max_entries or total > cls._cache_max_bytes):
+            key = next(iter(cls._query_cache))
+            total -= sizes[key]
+            cls._query_cache.pop(key)
 
     def __init__(self, config: SidecarConfig, executor: Executor | None = None) -> None:
         self.config = config
@@ -229,8 +247,9 @@ class SidecarRunner:
         cache_key = (str(Path(self.config.workspace_root).resolve()), command)
         if cacheable:
             with self._query_cache_lock:
+                self._prune_query_cache()
                 cached = self._query_cache.get(cache_key)
-                if cached is not None and (time.monotonic() - cached[0]) * 1000 < self.config.cgc_query_cache_ttl_ms:
+                if cached is not None:
                     return cached[1]
                 self._query_cache.pop(cache_key, None)
         started = time.monotonic()
@@ -258,7 +277,8 @@ class SidecarRunner:
         )
         if cacheable and result.status == SidecarStatus.OK:
             with self._query_cache_lock:
-                self._query_cache[cache_key] = (time.monotonic(), result)
+                self._query_cache[cache_key] = (time.monotonic() + self.config.cgc_query_cache_ttl_ms / 1000, result)
+                self._prune_query_cache()
         return result
 
     @staticmethod
@@ -280,39 +300,100 @@ class SidecarRunner:
 
     @staticmethod
     def _execute(command: Sequence[str], *, cwd: str, timeout: float, max_output_bytes: int) -> tuple[int, str, str]:
+        """Run a sidecar while draining output continuously with bounded memory."""
         process = subprocess.Popen(
-            list(command), cwd=cwd, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            list(command),
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
             start_new_session=True,
         )
+        assert process.stdout is not None
+        assert process.stderr is not None
+
+        stdout_buffer = bytearray()
+        stderr_buffer = bytearray()
+
+        def drain(pipe, buffer: bytearray) -> None:
+            try:
+                while True:
+                    chunk = pipe.read(64 * 1024)
+                    if not chunk:
+                        return
+                    remaining = max_output_bytes - len(buffer)
+                    if remaining > 0:
+                        buffer.extend(chunk[:remaining])
+            finally:
+                pipe.close()
+
+        stdout_thread = threading.Thread(target=drain, args=(process.stdout, stdout_buffer), daemon=True)
+        stderr_thread = threading.Thread(target=drain, args=(process.stderr, stderr_buffer), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        timed_out = False
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
+            timed_out = True
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            stdout, stderr = process.communicate()
-            raise TimeoutError(f"sidecar exceeded {timeout * 1000:.0f} ms deadline") from exc
-        return process.returncode, stdout[:max_output_bytes], stderr[:max_output_bytes]
+            process.wait()
+            timeout_error = TimeoutError(f"sidecar exceeded {timeout * 1000:.0f} ms deadline")
+            timeout_error.__cause__ = exc
+        finally:
+            stdout_thread.join()
+            stderr_thread.join()
+
+        if timed_out:
+            raise timeout_error
+
+        return (
+            process.returncode,
+            stdout_buffer.decode("utf-8", errors="replace"),
+            stderr_buffer.decode("utf-8", errors="replace"),
+        )
 
 
 class WorkspaceCgcIndexer:
     """One bounded CGC index worker and job registry per Workspace."""
+
+    _max_pending_jobs = 8  # Includes the running job.
+    _max_retained_jobs = 64
+    _job_retention_seconds = 3600
 
     def __init__(self, runner: SidecarRunner) -> None:
         self.runner = runner
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="serena-v8-cgc")
         self._jobs: dict[str, Future[SidecarResult]] = {}
         self._indexed_snapshots: dict[str, dict[str, tuple[int, int, str]]] = {}
+        self._dirty_paths: set[str] = set()
         self._job_paths: dict[str, str] = {}
         self._job_meta: dict[str, dict[str, object]] = {}
         self._lock = threading.RLock()
+
+    def _prune_jobs(self, reserve: int = 0) -> None:
+        completed = [job for job, future in self._jobs.items() if future.done()]
+        cutoff = time.time() - self._job_retention_seconds
+        for job in completed:
+            timestamp = self._job_meta[job].get("completed_at")
+            expired = timestamp is not None and datetime.fromisoformat(str(timestamp)).timestamp() <= cutoff
+            if expired or len(self._jobs) > self._max_retained_jobs - reserve:
+                self._jobs.pop(job)
+                self._job_paths.pop(job)
+                self._job_meta.pop(job)
 
     def submit(self, *, path: str = ".", force: bool = False) -> str:
         job_id = uuid.uuid4().hex
         with self._lock:
             target = str(self.runner._safe_path(path))
+            if sum(not future.done() for future in self._jobs.values()) >= self._max_pending_jobs:
+                raise RuntimeError("CGC index queue is full; retry after a pending job completes")
+            self._prune_jobs(reserve=1)
             self._job_paths[job_id] = target
             self._job_meta[job_id] = {"submitted_at": datetime.now(timezone.utc).isoformat()}
             if not force and self._is_unchanged(target):
@@ -330,12 +411,14 @@ class WorkspaceCgcIndexer:
             else:
                 future = self._executor.submit(self._run_job, job_id, force, path)
             self._jobs[job_id] = future
-            future.add_done_callback(lambda done: self._record_snapshot(job_id, done))
+
         return job_id
 
     def _is_unchanged(self, target: str) -> bool:
         previous = self._indexed_snapshots.get(target)
-        return bool(previous) and previous == self._snapshot(target)
+        relative = Path(target).relative_to(self.runner.config.workspace_root)
+        dirty = any(Path(p) == relative or relative in Path(p).parents for p in self._dirty_paths)
+        return not dirty and previous is not None and previous == self._snapshot(target)
 
     def _run_job(self, job_id: str, force: bool, path: str) -> SidecarResult:
         with self._lock:
@@ -343,6 +426,7 @@ class WorkspaceCgcIndexer:
         target = self.runner._safe_path(path)
         staging: Path | None = None
         try:
+            before = self._snapshot(str(target))
             if target == Path(self.runner.config.workspace_root):
                 staging = self._staging_db_path(job_id)
                 shutil.rmtree(staging, ignore_errors=True)
@@ -353,6 +437,17 @@ class WorkspaceCgcIndexer:
                     shutil.rmtree(staging, ignore_errors=True)
             else:
                 result = self.runner.cgc_index(force, path)
+            after = self._snapshot(str(target))
+            if result.status == SidecarStatus.OK:
+                changed = set(before) ^ set(after)
+                changed.update(p for p in before.keys() & after.keys() if before[p] != after[p])
+                with self._lock:
+                    self._indexed_snapshots[str(target)] = before
+                    self._dirty_paths.difference_update(before.keys() | after.keys())
+                    self._dirty_paths.update(changed)
+                    if changed:
+                        self._job_meta[job_id]["state"] = "dirty"
+                    self._job_meta[job_id]["changed_during_index"] = sorted(changed)
         except Exception as exc:
             if staging is not None:
                 shutil.rmtree(staging, ignore_errors=True)
@@ -387,15 +482,6 @@ class WorkspaceCgcIndexer:
         finally:
             shutil.rmtree(previous, ignore_errors=True)
 
-    def _record_snapshot(self, job_id: str, future: Future[SidecarResult]) -> None:
-        try:
-            result = future.result()
-        except Exception:
-            return
-        if result.status == SidecarStatus.OK:
-            with self._lock:
-                target = self._job_paths[job_id]
-                self._indexed_snapshots[target] = self._snapshot(target)
 
     def _snapshot(self, target: str) -> dict[str, tuple[int, int, str]]:
         root = Path(self.runner.config.workspace_root)
@@ -423,7 +509,7 @@ class WorkspaceCgcIndexer:
     def stale_paths(self) -> list[str]:
         with self._lock:
             snapshots = list(self._indexed_snapshots.items())
-        stale: set[str] = set()
+            stale = set(self._dirty_paths)
         for target, previous in snapshots:
             current = self._snapshot(target)
             stale.update(set(previous) ^ set(current))
@@ -432,6 +518,7 @@ class WorkspaceCgcIndexer:
 
     def status(self, job_id: str) -> dict[str, object]:
         with self._lock:
+            self._prune_jobs()
             future = self._jobs.get(job_id)
             metadata = dict(self._job_meta.get(job_id, {}))
         if future is None:

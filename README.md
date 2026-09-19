@@ -4,11 +4,11 @@
 
 High-performance, drop-in replacement for [Serena](https://github.com/oraios/serena) — the semantic coding agent runtime.
 
-V8 is **not** a wrapper. It is an **overlay** that installs directly into the serena-agent package, replacing the runtime while preserving all original tools, CLI commands, and MCP protocol compatibility.
+V8 is **not** a wrapper and no longer relies on copying files into another installation. It is a **replacement fork** distributed as `serena-agent`, so one package manager owns the `serena/` package while V8 preserves the original CLI, MCP protocol, and tool compatibility.
 
 ## 📊 Serena vs Serena V8
 
-V8 is a **drop-in overlay** on Serena. It preserves the existing MCP protocol, CLI commands, and tool registry rather than introducing a separate wrapper.
+V8 is a **drop-in replacement fork** of Serena. It preserves the existing MCP protocol, CLI commands, and tool registry while moving performance/runtime policy behind a centralized V8 dispatcher.
 
 | Area | Original Serena | Serena V8 in production |
 |---|---|---|
@@ -26,19 +26,33 @@ V8 is a **drop-in overlay** on Serena. It preserves the existing MCP protocol, C
 
 ### Performance measurement policy
 
-Benchmarks separate cold LSP startup from warm tool dispatch because they are different costs and depend on language servers and workspace size:
+Performance claims are generated from the built/installed V8 executable, not from
+an in-process source import. The benchmark verifies the CLI release identity,
+initializes a real stdio MCP session, validates every tool response, then records
+cold startup, first-call cost, warm P50/P95/P99, and RSS for the **Serena process
+plus recursive child/LSP processes**.
 
-- **Cold MCP initialization with normal V8 prewarm:** `Test Workspace C` measured approximately **2,220 ms**; the first `list_dir` after readiness took approximately **8 ms**.
-- **Warm MCP tool dispatch (standardized probe mode):** `list_dir` was measured for 5 rounds per test workspace using the production overlay and real JSON-RPC stdio. The probe excludes LSP prewarm so it does not create duplicate LSP processes.
+Run the self-suite against this repository:
 
-| Test workspace | Tools | Warm `list_dir` min | Median | Average | Max |
-|---|---:|---:|---:|---:|---:|
-| Test Workspace A | 36 | 5.22 ms | 6.76 ms | 7.57 ms | 12.78 ms |
-| Test Workspace B | 36 | 5.67 ms | 6.80 ms | 8.68 ms | 15.26 ms |
-| Test Workspace C | 36 | 3.27 ms | 3.68 ms | 4.55 ms | 8.47 ms |
-| Test Workspace D | 36 | 3.40 ms | 3.96 ms | 4.72 ms | 8.42 ms |
+```bash
+python benchmarks/performance_suite.py \
+  --project "$PWD" \
+  --executable "$(command -v serena)" \
+  --expected-version 8.0.0a1 \
+  --rounds 5
+```
 
-These are **measured production-overlay benchmarks**, not synthetic figures. They should not be interpreted as the latency of every semantic query, especially `find_symbol`, references, and diagnostics, which depend on LSP state and repository contents.
+The default suite covers filesystem dispatch, `find_symbol`, references,
+pattern search, and symbol overview. For external-edit overhead, run:
+
+```bash
+python benchmarks/freshness_poll_benchmark.py --files 2000 --rounds 20
+```
+
+Use `benchmarks/performance_gate.py` against saved JSON results to fail builds
+when P50/P95/P99, startup, or process-tree RSS regress beyond an agreed limit.
+Cold startup and warm dispatch are reported separately because language-server
+startup cost depends strongly on workspace size and language.
 
 ## 🧩 Monorepo and Multi-Repository Workspace Roots
 
@@ -115,12 +129,12 @@ This pattern supports future repositories without cross-project state leakage wh
 | 2 | Core daemon / Unix socket | Diagnostic/experimental; not used by normal MCP path |
 | 3 | Smart Scheduler — lanes, single-flight, backpressure | **Live** |
 | 4 | Persistent Symbol Index — SQLite/FTS5 | Diagnostic/experimental; native LSP remains authoritative |
-| 5 | LSP lifecycle management | **Live via native Serena manager + V8 prewarm** |
+| 5 | LSP lifecycle management | **Live via native Serena manager; semantic prewarm is opt-in** |
 | 6 | Multi-tier cache | Diagnostic/experimental; live path uses bounded V8 query cache |
 | 7 | Pipe/502 hardening + watchdog | **Live** |
 | 8 | P50/P95 telemetry and runtime metrics | **Live** |
 | 9 | Response optimization modules | Diagnostic/experimental; not enabled globally |
-| 10 | Multi-Workspace integration verification | **Live: 20 tests + 4/4 MCP probes** |
+| 10 | Regression + install/MCP verification | **Live: 73 tests + isolated clean-wheel MCP smoke** |
 | 8.5 | Correctness: LSP sync, cache invalidation, edit safety | **Live** |
 | 8.8 | Production wiring, MCP probe, auth circuit breaker | **Live** |
 
@@ -131,7 +145,7 @@ The drop-in production path is the normal `serena start-mcp-server --transport s
 - workspace-isolated asynchronous telemetry and bounded metrics snapshots;
 - per-workspace selective semantic-cache invalidation after edits, followed by Serena's authoritative LSP filesystem synchronization;
 - a bounded lane scheduler with single-flight reads, write serialization, queue backpressure, and request deadlines;
-- LSP prewarm before MCP readiness, while reusing Serena's native `LanguageServerManager` rather than starting a competing supervisor;
+- native `LanguageServerManager` creation before MCP readiness; the extra semantic warm-up probe is opt-in with `SERENA_V8_SEMANTIC_PREWARM=1` so default startup stays fast;
 - watchdog probes that exercise `initialize`, `tools/list`, and `list_dir` over real stdio MCP;
 - an `AUTH_BLOCKED` state for tunnel authorization failures, with restart suppression because restarts cannot grant permission.
 
@@ -149,45 +163,67 @@ A Serena process started with `--project <folder>` rejects attempts to activate 
 
 ### Current verified release
 
-- Serena V8: `8.0.0-dev.1`
+- Serena V8: `8.0.0a1`
 - Live tools: **36/36**
-- Regression/integration tests: **19/19 passed**
-- Functional MCP probe: **4/4 test workspaces passed**
-- Local readiness: **4/4 test workspace endpoints ready**
-- Memory policy: `MemoryHigh=1.4G`, `MemoryMax=2G` per Tunnel
+- Regression/integration tests: **73/73 passed**
+- Clean-wheel functional MCP smoke: **`list_dir` + semantic `find_symbol` passed**
+- Migration smoke: **Serena 1.7 → V8 → upstream rollback → V8 reinstall passed**
+- Memory policy example: `MemoryHigh=1.4G`, `MemoryMax=2G` per Tunnel
+- Final clean-wheel validation on this repository (2026-09-19, 2 warm rounds): `list_dir` P95 **5.343 ms**, `find_symbol` P95 **5.167 ms**, symbol overview P95 **6.404 ms**, references P95 **26.687 ms**, and search P95 **87.914 ms**. Maximum observed startup was **3.132 s**, maximum process-tree RSS was **278.332 MB**, and the 2,000-file steady-state freshness poll measured P95 **7.412 ms** while detecting a same-size preserved-mtime edit. With the fast-ready default, a cold references query paid **2.280 s** once to warm deeper LSP state; set `SERENA_V8_SEMANTIC_PREWARM=1` to shift that cost into startup when reference-heavy sessions are preferred. These figures are local validation data, not universal latency guarantees.
+
+Run the complete correctness/performance release gate before publishing a build:
+
+```bash
+./scripts/release-gate.sh
+```
+
+The gate runs regression tests, clean-wheel install/MCP/semantic smoke tests, the MCP workload suite, process-tree RSS checks, and the 2,000-file freshness benchmark. Thresholds can be overridden with `SERENA_V8_GATE_MAX_WARM_P95_MS`, `SERENA_V8_GATE_MAX_STARTUP_MS`, `SERENA_V8_GATE_MAX_RSS_MB`, and `SERENA_V8_GATE_MAX_FRESHNESS_P95_MS`.
 
 ## 🚀 Installation
 
-### Quick Install (Overlay on serena-agent)
+### Quick Install
+
+Use `uv tool` as the single installation model. Do **not** copy files into `site-packages`, and do not install a second `serena-v8` distribution beside `serena-agent`.
 
 ```bash
-# 1. Install serena-agent (if not already)
-uv tool install serena-agent
+# Recommended: one command handles fresh installs and upgrades from Serena 1.x.
+git clone https://github.com/elysiacores/Serena-V8-Turbo.git
+cd Serena-V8-Turbo
+SERENA_V8_SOURCE=. ./scripts/install-v8.sh
 
-# 2. Clone V8
-git clone https://github.com/elysiacores/serena-v8.git
-cd serena-v8
+# Or install directly from GitHub.
+uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
 
-# 3. Copy V8 over serena-agent
-SERENA_SITE=$(python -c "import serena; import os; print(os.path.dirname(serena.__file__))")
-cp -r src/serena/* "$SERENA_SITE/"
-cp -r src/serena_v8 "$SERENA_SITE/../"
+# Verify package/runtime ownership and version identity.
+serena --version
+serena-v8-doctor
+```
 
-# Remove legacy stats writers if an older V8 overlay installed one.
-mv "$SERENA_SITE/sitecustomize.py" "$SERENA_SITE/sitecustomize.py.disabled" 2>/dev/null || true
+Expected release identity: `Serena 8.0.0a1`. The distribution name is intentionally `serena-agent`; V8 replaces upstream Serena rather than co-installing another distribution that owns the same files.
 
-# 4. Create node symlinks (if using svelte/typescript LSP)
-ln -sf $(which node) ~/.local/bin/node
-ln -sf $(which npm) ~/.local/bin/npm
+### Upgrade
 
-# 5. Verify
-serena --version  # → Serena 8.0.0-dev.1
+```bash
+uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+serena-v8-doctor
+```
+
+### Roll back to upstream Serena
+
+```bash
+uv tool install --force serena-agent
+serena --version
 ```
 
 ### Standalone Tunnel + V8 (Production)
 
+Resolve executables from the machine where the service will run instead of copying `/home/user/...` paths from another host:
+
 ```bash
-# Create tunnel profile
+SERENA_BIN="$(command -v serena)"
+TUNNEL_BIN="$(command -v tunnel-client)"
+SERENA_BIN_DIR="$(dirname "$SERENA_BIN")"
+
 cat > ~/.config/tunnel-client/my-project.yaml << EOF
 admin_ui:
   open_browser: false
@@ -197,16 +233,15 @@ control_plane:
   base_url: https://api.openai.com
   tunnel_id: tunnel_xxxx
 health:
-  listen_addr: 0.0.0.0:8787
+  listen_addr: 127.0.0.1:8787
 log:
   level: info
 mcp:
   commands:
     default:
-      command: /home/user/.local/bin/serena start-mcp-server --transport stdio --project /path/to/project --tool-timeout 100 --log-level WARNING --context desktop-app
+      command: $SERENA_BIN start-mcp-server --transport stdio --project /path/to/project --tool-timeout 100 --log-level WARNING --context desktop-app
 EOF
 
-# Create systemd service
 cat > ~/.config/systemd/user/my-project-tunnel.service << EOF
 [Unit]
 Description=My Project Tunnel
@@ -214,19 +249,18 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/user/.local/bin/tunnel-client run --profile my-project
+ExecStart=$TUNNEL_BIN run --profile my-project
 Restart=always
 RestartSec=10
 MemoryHigh=1.4G
 MemoryMax=2G
 CPUQuota=50%
-Environment="PATH=/home/user/.hermes/node/bin:/home/user/.local/bin:/home/user/.local/share/uv/tools/serena-agent/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=$SERENA_BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 
 [Install]
 WantedBy=default.target
 EOF
 
-# Enable + start
 systemctl --user daemon-reload
 systemctl --user enable --now my-project-tunnel.service
 ```
@@ -266,21 +300,31 @@ ignored_paths:
 
 ### Tunnel Service File
 
-**Critical:** Must include `Environment="PATH=..."` with node + serena paths:
+**Critical:** the service PATH must contain the directories that actually hold
+`serena` and (for TypeScript/Svelte) `node` on that machine. Resolve them
+instead of copying paths from another host:
+
+```bash
+SERENA_BIN_DIR="$(dirname "$(command -v serena)")"
+NODE_BIN_DIR="$(dirname "$(command -v node)")"
+printf '%s\n' "$SERENA_BIN_DIR" "$NODE_BIN_DIR"
+```
+
+Then use those values in the service, for example:
 
 ```ini
 [Service]
-Environment="PATH=/home/user/.hermes/node/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=<serena-bin-dir>:<node-bin-dir>:/usr/local/bin:/usr/bin:/bin"
 ```
 
-Without this, LSP (svelte/typescript) fails to find `node` → tunnel crash loop.
+Without the real Node directory, Svelte/TypeScript LSP startup will fail.
 
 ## 🔍 Checking V8 Status
 
 ```bash
 # Version
 serena --version
-# → Serena 8.0.0-dev.1
+# → Serena 8.0.0a1
 
 # Runtime identity
 python -c "import serena; print(serena.get_v8_identity())"
@@ -427,13 +471,15 @@ ChatGPT / Hermes / Claude
         │     ├── bounded query cache
         │     └── live tool metrics
         │
-        ├── Tool.apply_ex()
-        │     └── bounded V8 scheduler
-        │           ├── read lanes + single-flight
-        │           └── serialized write/refactor lane
+        ├── Tool.apply_ex() compatibility façade
+        │     └── V8Dispatcher hot path
+        │           ├── bounded scheduler
+        │           │     ├── read lanes + single-flight
+        │           │     └── serialized write/refactor lane
+        │           └── queue/execution/total latency telemetry
         │
         └── Serena native Project + LanguageServerManager
-              ├── V8 prewarm before readiness
+              ├── manager ready before MCP; semantic prewarm opt-in
               ├── LSP reuse/restart lifecycle
               ├── edit → cache invalidation → filesystem sync
               └── original Serena tools (36)
@@ -458,4 +504,4 @@ MIT (same as Serena upstream)
 
 ---
 
-**GitHub:** https://github.com/elysiacores/serena-v8
+**GitHub:** https://github.com/elysiacores/Serena-V8-Turbo

@@ -13,7 +13,7 @@ import time
 import threading
 import json
 from enum import Enum
-from typing import Any, Callable, Optional, Dict, Tuple
+from typing import Callable, Optional, Dict, Tuple
 from dataclasses import dataclass, field
 from concurrent.futures import Future
 import logging
@@ -39,13 +39,24 @@ class ScheduledRequest:
     project: str
     future: Future
     fn: Callable
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.perf_counter)
     started_at: float = 0.0
+    finished_at: float = 0.0
     cancelled: bool = False
-    
+    timer: Optional[threading.Timer] = None
+    timeout_seconds: float = 0.0
+
     @property
-    def wait_time_ms(self):
-        return round((time.time() - self.created_at) * 1000, 2)
+    def wait_time_ms(self) -> float:
+        endpoint = self.started_at or time.perf_counter()
+        return round(max(0.0, endpoint - self.created_at) * 1000, 3)
+
+    @property
+    def execution_time_ms(self) -> float:
+        if not self.started_at:
+            return 0.0
+        endpoint = self.finished_at or time.perf_counter()
+        return round(max(0.0, endpoint - self.started_at) * 1000, 3)
     
     def cancel(self):
         self.cancelled = True
@@ -68,23 +79,35 @@ LANE_CONFIGS = {
     Lane.WRITE_REFACTOR: LaneConfig(max_concurrent=1, max_queue=20, timeout=300),
 }
 
-# Tool to lane mapping
+# Tool-to-lane mapping. Only explicitly audited reads are concurrent.
+# Unknown tools remain serialized/exclusive by default in classify().
 TOOL_LANES = {
-    # Fast read
+    # Cheap filesystem/config reads.
     "list_dir": Lane.FAST_READ,
     "read_file": Lane.FAST_READ,
+    "find_file": Lane.FAST_READ,
+    "search_for_pattern": Lane.FAST_READ,
     "get_current_config": Lane.FAST_READ,
-    "get_symbols_overview": Lane.FAST_READ,
-    
-    # Semantic read
+    "list_memories": Lane.FAST_READ,
+    "read_memory": Lane.FAST_READ,
+    "list_queryable_projects": Lane.FAST_READ,
+    "ast_grep_search": Lane.FAST_READ,
+    "cgc_index_status": Lane.FAST_READ,
+    "cgc_stale_paths": Lane.FAST_READ,
+
+    # LSP / semantic / graph reads.
+    "get_symbols_overview": Lane.SEMANTIC_READ,
     "find_symbol": Lane.SEMANTIC_READ,
+    "find_declaration": Lane.SEMANTIC_READ,
     "find_referencing_symbols": Lane.SEMANTIC_READ,
     "find_implementations": Lane.SEMANTIC_READ,
-    "get_symbol_contents": Lane.SEMANTIC_READ,
-    "search_for_pattern": Lane.SEMANTIC_READ,
-    "get_diagnostics": Lane.SEMANTIC_READ,
-    
-    # Write/refactor
+    "get_diagnostics_for_file": Lane.SEMANTIC_READ,
+    "get_diagnostics_for_symbol": Lane.SEMANTIC_READ,
+    "cgc_callers": Lane.SEMANTIC_READ,
+    "cgc_callees": Lane.SEMANTIC_READ,
+    "cgc_query": Lane.SEMANTIC_READ,
+
+    # Known mutations. The conservative fallback catches all other tools too.
     "create_text_file": Lane.WRITE_REFACTOR,
     "replace_content": Lane.WRITE_REFACTOR,
     "replace_in_files": Lane.WRITE_REFACTOR,
@@ -95,8 +118,11 @@ TOOL_LANES = {
     "replace_lines": Lane.WRITE_REFACTOR,
     "rename_symbol": Lane.WRITE_REFACTOR,
     "rename_memory": Lane.WRITE_REFACTOR,
+    "write_memory": Lane.WRITE_REFACTOR,
     "delete_memory": Lane.WRITE_REFACTOR,
     "edit_memory": Lane.WRITE_REFACTOR,
+    "ast_grep_rewrite": Lane.WRITE_REFACTOR,
+    "cgc_index": Lane.WRITE_REFACTOR,
 }
 
 
@@ -129,8 +155,12 @@ class SmartScheduler:
         self._total_rejected = 0
     
     def classify(self, tool: str) -> Lane:
-        """Classify a tool into a lane."""
-        return TOOL_LANES.get(tool, Lane.SEMANTIC_READ)
+        """Only explicitly audited reads may run concurrently or deduplicate.
+
+        Unknown tools include shell commands, project switches and plugins;
+        treating them as reads silently drops mutations and bypasses exclusion.
+        """
+        return TOOL_LANES.get(tool, Lane.WRITE_REFACTOR)
     
     def _single_flight_key(self, tool: str, args: dict, project: str) -> str:
         """Generate key for single-flight deduplication."""
@@ -152,8 +182,10 @@ class SmartScheduler:
         
         # Single-flight check
         with self._lock:
+            # Single-flight is safe for idempotent reads only. Never merge
+            # mutations: identical write requests may be intentional retries.
             key = self._single_flight_key(tool, args, project)
-            if key in self._in_flight:
+            if lane != Lane.WRITE_REFACTOR and key in self._in_flight:
                 existing = self._in_flight[key]
                 if not existing.done():
                     log.info(f"Single-flight: deduplicating {tool}")
@@ -175,14 +207,19 @@ class SmartScheduler:
                 project=project,
                 future=future,
                 fn=fn,
+                timeout_seconds=timeout,
             )
-            
+            # Keep timing metadata on the Future so the central dispatcher can
+            # report queue/execution stages without a second request registry.
+            setattr(future, "_serena_v8_request", request)
+
             # Register for single-flight
             self._in_flight[key] = future
             
             # Add to queue
             self._lanes[lane].append(request)
             timer = threading.Timer(timeout, self._timeout_request, args=(request,))
+            request.timer = timer
             timer.daemon = True
             timer.start()
             
@@ -192,14 +229,16 @@ class SmartScheduler:
             return future, request_id
 
     def _timeout_request(self, request: ScheduledRequest):
-        """Fail a request at its deadline without killing its worker thread."""
+        """Expire queued work/read waiters; never pretend a running write stopped."""
         with self._lock:
             if request.future.done():
+                return
+            if request.lane == Lane.WRITE_REFACTOR and request.future.running():
                 return
             request.cancelled = True
             self._total_timeout += 1
             request.future.set_exception(TimeoutError(
-                f"{request.tool} exceeded {self._configs[request.lane].timeout}s deadline"
+                f"{request.tool} exceeded {request.timeout_seconds}s deadline"
             ))
     
     def _try_dispatch(self, lane: Lane):
@@ -209,14 +248,21 @@ class SmartScheduler:
             queue = self._lanes[lane]
             
             while queue and self._active[lane] < config.max_concurrent:
+                # Writes exclude every lane, not just other writes. Once a
+                # writer queues, let existing reads drain before admitting more.
+                if lane == Lane.WRITE_REFACTOR:
+                    if any(self._active.values()):
+                        break
+                elif self._active[Lane.WRITE_REFACTOR] or self._lanes[Lane.WRITE_REFACTOR]:
+                    break
                 request = queue.pop(0)
                 
-                if request.cancelled:
+                if request.cancelled or not request.future.set_running_or_notify_cancel():
                     continue
                 
                 self._active[lane] += 1
                 self._total_dispatched += 1
-                request.started_at = time.time()
+                request.started_at = time.perf_counter()
                 
                 # Execute in background
                 threading.Thread(
@@ -236,12 +282,17 @@ class SmartScheduler:
         except Exception as exc:
             error = exc
         finally:
+            request.finished_at = time.perf_counter()
             with self._lock:
+                if request.timer is not None:
+                    request.timer.cancel()
+                    request.timer = None
                 self._active[request.lane] -= 1
                 key = self._single_flight_key(request.tool, request.args, request.project)
                 if key in self._in_flight and self._in_flight[key] is request.future:
                     del self._in_flight[key]
-                self._try_dispatch(request.lane)
+                for lane in (Lane.WRITE_REFACTOR, Lane.FAST_READ, Lane.SEMANTIC_READ):
+                    self._try_dispatch(lane)
         # Publish completion after the lane accounting is consistent.
         if not request.cancelled and not request.future.done():
             if error is not None:
@@ -317,8 +368,6 @@ COMPOSITE_TOOLS = {
 
 def register_composite_tools():
     """Register composite tools with Serena."""
-    from serena.tools import Tool, ToolMarkerSymbolicRead
-    
     # This would be implemented as actual Tool subclasses
     # For now, just log that they're available
     for name, info in COMPOSITE_TOOLS.items():

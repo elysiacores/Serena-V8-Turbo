@@ -2,23 +2,26 @@
 Serena V8 — Next-Generation Semantic Coding Runtime
 """
 
-__version__ = "8.0.0-dev.1"
-__build__ = "2026-09-18"
-__commit__ = "v8-phase1"
-__protocol_version__ = "1.0"
+from serena_v8._version import (
+    BUILD as __build__,
+    COMMIT as __commit__,
+    PROTOCOL_VERSION as __protocol_version__,
+    VERSION as __version__,
+)
 
-import os
-import time
-import threading
-import json
+import contextlib
 import hashlib
+import json
+import os
 import platform
 import queue
 import re
-from pathlib import Path
-from collections import OrderedDict, defaultdict
-from typing import Any, Optional, Dict
 import statistics
+import threading
+import time
+from collections import OrderedDict, defaultdict
+from pathlib import Path
+from typing import Any, Optional
 
 # ═══════════════════════════════════════════════════════════════
 # V8 RUNTIME IDENTITY
@@ -72,13 +75,15 @@ class V8Telemetry:
             
             totals = [r.get("total_ms", 0) for r in self._requests]
             queues = [r.get("queue_ms", 0) for r in self._requests]
+            executions = [r.get("execution_ms", 0) for r in self._requests]
             caches = [r.get("cache_ms", 0) for r in self._requests]
             lsps = [r.get("lsp_ms", 0) for r in self._requests]
             serials = [r.get("serialize_ms", 0) for r in self._requests]
             transports = [r.get("transport_ms", 0) for r in self._requests]
             
             def pct(data, p):
-                if not data: return 0
+                if not data:
+                    return 0
                 s = sorted(data)
                 return round(s[int(len(s) * p)], 2)
             
@@ -93,6 +98,7 @@ class V8Telemetry:
                     "max": round(max(totals), 2) if totals else 0,
                 },
                 "queue_ms": {"p50": pct(queues, 0.5), "p95": pct(queues, 0.95)},
+                "execution_ms": {"p50": pct(executions, 0.5), "p95": pct(executions, 0.95)},
                 "cache_ms": {"p50": pct(caches, 0.5), "p95": pct(caches, 0.95)},
                 "lsp_ms": {"p50": pct(lsps, 0.5), "p95": pct(lsps, 0.95)},
                 "serialize_ms": {"p50": pct(serials, 0.5)},
@@ -101,6 +107,7 @@ class V8Telemetry:
                 "cache_misses": sum(1 for r in self._requests if r.get("cache_miss")),
                 "errors": sum(1 for r in self._requests if r.get("error")),
                 "timeouts": sum(1 for r in self._requests if r.get("timeout")),
+                "deduplicated": sum(1 for r in self._requests if r.get("deduplicated")),
             }
     
     def recent(self, n: int = 10) -> list:
@@ -134,9 +141,6 @@ def get_telemetry() -> V8Telemetry:
 # ═══════════════════════════════════════════════════════════════
 # V8 REQUEST TIMER (context manager for stage measurement)
 # ═══════════════════════════════════════════════════════════════
-
-import contextlib
-import time
 
 @contextlib.contextmanager
 def v8_measure(tool_name: str, project: str = "", **extra):
@@ -386,6 +390,11 @@ def record_tool_call(
     error: bool = False,
     timeout: bool = False,
     project: str = "",
+    queue_ms: float = 0.0,
+    execution_ms: float = 0.0,
+    lane: str = "unknown",
+    request_id: str = "",
+    deduplicated: bool = False,
     stats_path: Path | str | None = None,
 ) -> None:
     """Record a completed MCP tool call and refresh the V8 status file."""
@@ -394,6 +403,11 @@ def record_tool_call(
             "tool": tool_name,
             "project": project,
             "total_ms": round(elapsed_ms, 3),
+            "queue_ms": round(queue_ms, 3),
+            "execution_ms": round(execution_ms, 3),
+            "lane": lane,
+            "request_id": request_id,
+            "deduplicated": deduplicated,
             "error": error,
             "timeout": timeout,
         }

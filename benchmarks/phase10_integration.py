@@ -21,7 +21,7 @@ from typing import Dict, List, Any
 from concurrent.futures import Future, TimeoutError
 
 # ═══ Setup paths ═══
-V8_SRC = Path.home() / "SuperProjects" / "serena-v8-fork" / "src"
+V8_SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(V8_SRC))
 
 
@@ -41,7 +41,7 @@ class V8IntegrationTest:
         
         checks = {
             "name": identity.get("name") == "Serena V8",
-            "version": identity.get("version") == "8.0.0-dev.1",
+            "version": identity.get("version") == "8.0.0a1",
             "has_commit": bool(identity.get("commit")),
             "has_runtime_path": bool(identity.get("runtime_path")),
         }
@@ -518,7 +518,7 @@ if __name__ == "__main__":
     result = test.run_all()
     
     # Save results
-    output = Path.home() / "SuperProjects" / "serena-v8-fork" / "benchmarks" / "results" / "phase10_integration.json"
+    output = Path(__file__).resolve().parent / "results" / "phase10_integration.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w") as f:
         json.dump(result, f, indent=2)

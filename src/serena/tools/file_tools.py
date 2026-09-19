@@ -121,6 +121,7 @@ class ListDirTool(Tool):
             return self._to_json(error_info)
 
         self.project.validate_relative_path(relative_path)
+        max_results = max(1, min(max_results, 10000))
 
         is_ignored_path_fn = self.project.get_is_ignored_path_fn(relative_path, skip_ignored_files)
         dirs, files = scan_directory(
@@ -129,9 +130,9 @@ class ListDirTool(Tool):
             recursive=recursive,
             is_ignored_dir=is_ignored_path_fn,
             is_ignored_file=is_ignored_path_fn,
+            max_results=max_results,
         )
 
-        max_results = max(1, min(max_results, 10000))
         total_entries = len(dirs) + len(files)
         if total_entries > max_results:
             remaining = max_results
@@ -143,6 +144,7 @@ class ListDirTool(Tool):
             "files": files,
             "returned_count": len(dirs) + len(files),
             "total_count": total_entries,
+            "total_count_is_exact": total_entries <= max_results,
             "truncated": total_entries > len(dirs) + len(files),
         })
         return self._limit_length(result, max_answer_chars)
@@ -191,6 +193,8 @@ class FindFileTool(Tool):
             is_ignored_dir=is_ignored_path_fn,
             is_ignored_file=is_ignored_file,
             relative_to=self.get_project_root(),
+            max_results=max_results,
+            limit_files_only=True,
         )
 
         result_files = files[:max_results]
@@ -198,6 +202,7 @@ class FindFileTool(Tool):
             "files": result_files,
             "returned_count": len(result_files),
             "total_count": len(files),
+            "total_count_is_exact": len(files) <= max_results,
             "truncated": len(files) > len(result_files),
         })
         return self._limit_length(result, max_answer_chars)

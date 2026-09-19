@@ -2,12 +2,15 @@
 build-backend = "hatchling.build"
 requires = ["hatchling"]
 
+[tool.hatch.version]
+path = "src/serena_v8/_version.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/serena", "src/serena_v8", "src/solidlsp", "src/interprompt"]
 
 [project]
-name = "serena-v8"
-version = "8.0.0a1"
+name = "serena-agent"
+dynamic = ["version"]
 description = "Serena V8 — Performance & Stability Fork"
 authors = [{ name = "Nut Werayoot", email = "elysia.cores@gmail.com" }]
 readme = "README.md"
@@ -61,3 +64,4 @@ serena-hooks = "serena.hooks:hook_commands"
 serena-v8 = "serena.cli:top_level"
 serena-v8-daemon = "serena_v8.core_daemon:daemon_main"
 serena-v8-adapter = "serena_v8.core_daemon:adapter_main"
+serena-v8-doctor = "serena_v8.install_doctor:main"

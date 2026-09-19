@@ -1,414 +1,205 @@
-# Serena V8 — Installation & Troubleshooting Guide
+# Serena V8 — Installation & Troubleshooting
 
-> If you already have Serena installed, follow these steps to migrate to V8 without breaking anything.
+Serena V8 is a replacement fork of Serena and is distributed with the package name `serena-agent`. There must be exactly one package-manager owner for the `serena/` package. Do not combine an upstream `serena-agent` install with a legacy `serena-v8` distribution or a manual `site-packages` overlay.
 
----
+## Supported installation model
 
-## Table of Contents
-
-1. [Quick Check: What version am I running?](#1-quick-check)
-2. [Migrating from Serena to V8](#2-migrating)
-3. [Tunnel Configuration](#3-tunnel-config)
-4. [Common Problems & Fixes](#4-common-problems)
-5. [Diagnostic Commands](#5-diagnostic-commands)
-6. [Rollback Plan](#6-rollback)
-7. [FAQ](#7-faq)
-
----
-
-## 1. Quick Check: What version am I running?
-
-Run this command:
+Use `uv tool` for installation, upgrades, and rollback:
 
 ```bash
-python3 -c "import serena; print(serena.__version__)"
+# Fresh install or upgrade from Serena 1.x
+uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+
+# Verify
+serena --version
+serena-v8-doctor
+uv tool list
 ```
 
-| Output | Meaning | Action |
-|--------|---------|--------|
-| `1.7.0` | Serena original | Migrate to V8 |
-| `8.0.0-dev.1` | V8 installed but not loaded | Check Python path |
-| `8.0.0-dev.1` + `get_v8_identity` works | V8 active | No action needed |
-| `ModuleNotFoundError` | Not installed | Install V8 |
+Expected V8 release identity:
 
-### Check V8 runtime loaded:
+```text
+Serena 8.0.0a1
+```
+
+For a local checkout:
+
 ```bash
-python3 -c "
-import serena
-print(f'Version: {serena.__version__}')
-print(f'V8: {hasattr(serena, \"get_v8_identity\")}')
-if hasattr(serena, 'get_v8_identity'):
-    import json
-    print(json.dumps(serena.get_v8_identity(), indent=2))
-"
+SERENA_V8_SOURCE=. ./scripts/install-v8.sh
 ```
 
-Expected output when V8 is active:
-```
-Version: 8.0.0-dev.1
-V8: True
-{
-  "name": "Serena V8",
-  "version": "8.0.0-dev.1",
-  "build": "2026-09-18",
-  "commit": "v8-phase1",
-  ...
-}
-```
+Do not use `pip install`, `uv pip install`, or copy `src/serena` into another tool environment. Those commands target different environment models and can create an installation that works temporarily while package metadata still belongs to another distribution.
 
----
+## Why old installs broke
 
-## 2. Migrating from Serena to V8
+Older V8 instructions could put both `serena-agent` and `serena-v8` metadata in one Python environment while both distributions owned the same `serena/` files. Uninstalling either distribution could then remove files required by the other. Manual overlays had the inverse problem: runtime files were V8 while package-manager metadata still reported Serena 1.x.
 
-### Step 1: Backup your current Serena
+The current release fixes this by using `serena-agent` as the single distribution identity and keeping V8-specific code under `serena_v8/` inside the same wheel.
+
+## Diagnose an installation
+
+Run:
+
 ```bash
-# Find where Serena is installed
-python3 -c "import serena; print(serena.__file__)"
-
-# Backup (copy the entire package directory)
-SERENA_PATH=$(python3 -c "import serena, os; print(os.path.dirname(serena.__file__))")
-cp -r "$SERENA_PATH" "$SERENA_PATH.backup_$(date +%Y%m%d)"
-```
-
-### Step 2: Install V8
-```bash
-pip install git+https://github.com/elysiacores/serena-v8.git
-```
-
-### Step 3: Verify installation
-```bash
-python3 -c "import serena; print(f'V8: {serena.get_v8_identity()}')"
-```
-
-### Step 4: Check tunnel configs still work
-```bash
-# Test with a project
-serena start-mcp-server --project /path/to/your/project --tool-timeout 100 --log-level INFO
-# Press Ctrl+C after it starts successfully
-```
-
-### What happens to my old Serena?
-- The old Serena package is **overwritten** by V8
-- Your old config files remain unchanged
-- Your tunnel profiles remain compatible
-- Your `.serena/` directory is preserved
-
----
-
-## 3. Tunnel Configuration
-
-### If you use tunnel-client with Serena:
-
-Before (Serena 1.7):
-```yaml
-mcp:
-  commands:
-    - command: "/home/user/.local/bin/serena start-mcp-server --project /path"
-```
-
-After (Serena V8):
-```yaml
-# SAME COMMAND — V8 is a drop-in replacement
-mcp:
-  commands:
-    - command: "/home/user/.local/bin/serena start-mcp-server --project /path"
-```
-
-### To use V8 with uv:
-```yaml
-mcp:
-  commands:
-    - command: "/home/user/.local/share/uv/tools/serena-agent/bin/serena start-mcp-server --project /path"
-```
-
-### Verify tunnel is using V8:
-```bash
-# Check tunnel process
-ps aux | grep 'tunnel-client\|serena' | grep -v grep
-
-# Check tunnel logs
-journalctl --user -u workspace-b-tunnel.service -n 50 --no-pager | grep -i "v8\|version"
-```
-
----
-
-## 4. Common Problems & Fixes
-
-### Problem: `serena --version` still shows 1.7.0
-
-**Cause:** Python is importing the wrong serena package.
-
-**Fix:**
-```bash
-# Check which serena is being used
+serena-v8-doctor
 which serena
-python3 -c "import serena; print(serena.__file__)"
-
-# Reinstall V8
-pip uninstall serena-agent -y
-pip install git+https://github.com/elysiacores/serena-v8.git
-
-# If using uv
-uv pip uninstall serena-agent
-uv pip install git+https://github.com/elysiacores/serena-v8.git
+serena --version
+uv tool list
 ```
 
-### Problem: V8 runtime not loaded (stats are empty)
+A healthy V8 install reports the same version (`8.0.0a1`) for the distribution and runtime and does not report a legacy `serena-v8` distribution.
 
-**Cause:** V8 runtime module not in Python path.
-
-**Fix:**
-```bash
-# Check if v8_runtime exists
-python3 -c "from serena.v8_runtime import get_v8_identity; print('OK')"
-
-# If it fails, reinstall from source
-git clone https://github.com/elysiacores/serena-v8.git
-cd serena-v8
-pip install -e .
-```
-
-### Problem: V8 installed but tunnel stats show 0 hits
-
-**Cause:** Tunnel is running old serena process.
-
-**Fix:**
-```bash
-# Kill old tunnel processes
-pkill -f 'tunnel-client' 2>/dev/null
-pkill -f 'serena start-mcp' 2>/dev/null
-
-# Restart tunnels
-systemctl --user restart workspace-a-tunnel.service
-systemctl --user restart workspace-b-tunnel.service
-# ... restart all your tunnel services
-
-# Verify V8 is running
-cat ~/.serena-v8/stats.json
-```
-
-### Problem: ModuleNotFoundError: serena_v8
-
-**Cause:** V8 package not included in build.
-
-**Fix:**
-```bash
-# Reinstall with V8 extras
-pip install git+https://github.com/elysiacores/serena-v8.git
-```
-
-### Problem: Stats file exists but always shows 0 entries
-
-**Cause:** V8 runtime loads but requests aren't being tracked.
-
-**Fix:**
-```bash
-# Test V8 runtime directly
-python3 -c "
-import time
-from serena.v8_runtime import v8_measure, _v8_telemetry
-
-with v8_measure('test_tool', project='/tmp') as stage:
-    stage('queue')
-    time.sleep(0.01)
-    stage('cache')
-    time.sleep(0.05)
-    stage('lsp')
-    stage('serialize')
-
-print(f'Telemetry: {_v8_telemetry.stats()}')
-"
-
-# If this works but tunnel doesn't — the tunnel is running old Serena
-```
-
----
-
-## 5. Diagnostic Commands
-
-### Full diagnostic:
-```bash
-python3 << 'EOF'
-import sys
-import os
-import json
-
-print("=== V8 Diagnostic ===")
-
-# 1. Python path
-print(f"\n1. Python: {sys.executable}")
-print(f"   Path: {sys.path[:3]}")
-
-# 2. Serena location
-try:
-    import serena
-    print(f"\n2. Serena: {serena.__file__}")
-    print(f"   Version: {serena.__version__}")
-except ImportError:
-    print("\n2. Serena: NOT INSTALLED")
-    sys.exit(1)
-
-# 3. V8 runtime
-v8_loaded = hasattr(serena, 'get_v8_identity')
-print(f"\n3. V8 Runtime: {'LOADED' if v8_loaded else 'NOT LOADED'}")
-if v8_loaded:
-    identity = serena.get_v8_identity()
-    print(f"   Version: {identity.get('version')}")
-    print(f"   Commit: {identity.get('commit')}")
-    print(f"   Uptime: {identity.get('uptime_seconds')}s")
-
-# 4. V8 cache
-try:
-    from serena.symbol import _v8_symbol_cache
-    print(f"\n4. Symbol Cache: {_v8_symbol_cache.stats()}")
-except Exception as e:
-    print(f"\n4. Symbol Cache: ERROR - {e}")
-
-# 5. V8 telemetry
-try:
-    from serena.v8_runtime import _v8_telemetry
-    print(f"\n5. Telemetry: {_v8_telemetry.stats()}")
-except Exception as e:
-    print(f"\n5. Telemetry: ERROR - {e}")
-
-# 6. V8 stats file
-stats_file = os.path.expanduser("~/.serena-v8/stats.json")
-if os.path.exists(stats_file):
-    with open(stats_file) as f:
-        d = json.load(f)
-    print(f"\n6. Stats file: {json.dumps(d, indent=2)[:500]}")
-else:
-    print(f"\n6. Stats file: NOT FOUND at {stats_file}")
-
-# 7. Serena processes
-import subprocess
-result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
-serena_procs = [l for l in result.stdout.split('\n') if 'serena' in l.lower() and 'grep' not in l.lower()]
-print(f"\n7. Serena processes: {len(serena_procs)}")
-for p in serena_procs[:3]:
-    parts = p.split()
-    if len(parts) >= 11:
-        print(f"   PID={parts[1]} CPU={parts[2]}% MEM={parts[3]}% CMD={' '.join(parts[10:60])}")
-
-print("\n=== End Diagnostic ===")
-EOF
-```
-
-### Quick check:
-```bash
-# One-liner status
-python3 -c "
-import serena, json
-d = {'version': serena.__version__, 'v8': hasattr(serena, 'get_v8_identity')}
-if d['v8']:
-    d['identity'] = serena.get_v8_identity()
-    from serena.v8_runtime import _v8_telemetry, get_memory_info
-    d['telemetry'] = _v8_telemetry.stats()
-    d['memory'] = get_memory_info()
-print(json.dumps(d, indent=2))
-"
-```
-
----
-
-## 6. Rollback Plan
-
-If V8 causes issues and you need to go back:
+If `serena-v8-doctor` says the executable is outside the active environment, inspect your PATH:
 
 ```bash
-# Step 1: Uninstall V8
-pip uninstall serena-agent -y
-
-# Step 2: Reinstall original Serena
-pip install serena-agent
-
-# Step 3: Restore backup (if needed)
-SERENA_PATH=$(python3 -c "import serena, os; print(os.path.dirname(serena.__file__))")
-cp -r "$SERENA_PATH.backup_$(date +%Y%m%d)/serena"/* "$SERENA_PATH/serena/"
-
-# Step 4: Restart tunnels
-systemctl --user restart workspace-b-tunnel.service workspace-a-tunnel.service
-
-# Step 5: Verify
-python3 -c "import serena; print(serena.__version__)"
-# Should show 1.7.0
+type -a serena
+uv tool dir --bin
 ```
 
----
+Then update your shell once if the uv tool bin directory is missing:
 
-## 7. FAQ
-
-### Q: Do I need to uninstall Serena first?
-A: No. V8 overwrites Serena. Uninstalling first is optional but recommended for clean migration.
-
-### Q: Will my tunnel configs work unchanged?
-A: Yes. V8 is a drop-in replacement. Same command, same arguments.
-
-### Q: Where does V8 store its data?
-A: 
-- `~/.serena-v8/stats.json` — runtime statistics
-- `~/.serena-v8/symbol_index.db` — persistent symbol index
-- `~/.serena-v8/cache.db` — search result cache
-
-### Q: How do I know V8 is actually running?
-A: Run:
 ```bash
-python3 -c "import serena; print('V8' if hasattr(serena, 'get_v8_identity') else 'Original Serena')"
+uv tool update-shell
 ```
 
-### Q: Does V8 work with Claude/Cursor/Hermes?
-A: Yes. Any MCP client that works with Serena will work with V8.
+Open a new shell and rerun the doctor.
 
-### Q: How do I see what's slow?
-A: Check V8 stats:
+## Migrating an old manual overlay
+
+A manual overlay cannot be repaired reliably by copying more files over it. Reinstall the tool environment from package metadata:
+
 ```bash
-cat ~/.serena-v8/stats.json | python3 -m json.tool
+# Remove a legacy V8 tool if it exists under the old distribution name.
+uv tool uninstall serena-v8 2>/dev/null || true
+
+# Replace whichever serena-agent tool environment currently exists.
+uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+
+serena-v8-doctor
 ```
 
-### Q: V8 shows version 8.0.0-dev.1 but stats are empty?
-A: The V8 runtime is loading but requests aren't passing through it. Restart your tunnels:
+Your user configuration under `~/.serena/` and project `.serena/` directories is not stored inside the tool environment and is not removed by this operation.
+
+## `serena --version` still shows 1.x
+
+The shell is finding a different executable. Check every candidate:
+
 ```bash
-pkill -f 'serena start-mcp'
-systemctl --user restart <your-tunnel-service>
+type -a serena
+uv tool list
 ```
 
-### Q: Can I run V8 and Serena side-by-side?
-A: Not recommended — they share the same package name. Use separate virtualenvs if needed.
+Reinstall V8 and refresh PATH:
 
----
+```bash
+uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+uv tool update-shell
+```
 
-## Quick Reference
+Do not fix this by copying files into whichever `site-packages` directory happens to be returned by `python`; that Python may not be the interpreter used by the uv tool.
 
-| Task | Command |
-|------|---------|
-| Check version | `python3 -c "import serena; print(serena.__version__)"` |
-| Check V8 loaded | `python3 -c "import serena; print(hasattr(serena, 'get_v8_identity'))"` |
-| View stats | `cat ~/.serena-v8/stats.json` |
-| Restart tunnels | `systemctl --user restart <tunnel-service>` |
-| Kill old processes | `pkill -f 'serena start-mcp'` |
-| Run diagnostic | See [Diagnostic Commands](#5-diagnostic-commands) |
-| Rollback | See [Rollback Plan](#6-rollback) |
+## MCP starts but semantic tools fail
 
----
+First verify the same executable outside the MCP client:
 
-## For AI Agents: Common Error Patterns
+```bash
+SERENA_BIN="$(command -v serena)"
+"$SERENA_BIN" start-mcp-server --transport stdio --project /absolute/path/to/project --tool-timeout 100 --log-level INFO
+```
 
-### Pattern: `serena.__version__ == "1.7.0"` after V8 install
-**Root cause:** Python path order — original serena found before V8
-**Fix:** Uninstall original serena first, then install V8
+If this works directly but not from a service/tunnel, the issue is usually the service environment or executable path. Configure the service with the absolute result of `command -v serena`; do not paste `/home/user/...` paths from another machine.
 
-### Pattern: V8 installed but stats.json has 0 entries
-**Root cause:** Tunnel running stale process from before V8 install
-**Fix:** Kill all `serena start-mcp` processes and restart tunnels
+## Startup versus first heavy semantic query
 
-### Pattern: `ModuleNotFoundError: serena_v8`
-**Root cause:** `serena_v8` package not in build targets
-**Fix:** Reinstall from latest GitHub (fixed in commit `4ed9ad0`)
+By default V8 creates Serena's native language-server manager before MCP readiness but does not force an extra semantic warm-up probe. This keeps startup lower for sessions that mostly use filesystem or lightweight symbol tools.
 
-### Pattern: V8 runtime import fails with `ModuleNotFoundError: solidlsp`
-**Root cause:** `solidlsp` not bundled in V8
-**Fix:** Reinstall from latest GitHub (fixed in commit `26c9635`)
+For reference-heavy sessions, opt into semantic prewarm:
 
-### Pattern: Stats file exists but timestamp doesn't update
-**Root cause:** V8 runtime not loaded — stats file is from previous test
-**Fix:** Verify V8 runtime is loaded, restart tunnels
+```bash
+export SERENA_V8_SEMANTIC_PREWARM=1
+```
+
+This deliberately trades a slower MCP startup for a faster first deep LSP query such as `find_referencing_symbols`. It does not change warm steady-state behavior.
+
+## TypeScript/Svelte language server does not start
+
+Services often have a smaller PATH than an interactive shell. Verify Node from the same service account:
+
+```bash
+command -v node
+command -v npm
+node --version
+```
+
+Add the actual Node directory and the uv tool bin directory to the service PATH. Avoid assuming a Hermes, nvm, fnm, or system Node location exists on another machine.
+
+## External edits look stale
+
+V8 synchronizes external file changes before semantic queries. POSIX uses the fast mtime/ctime/size metadata path by default; `ctime_ns` still changes when content is rewritten even if a tool restores the old mtime. Windows uses content hashing because ctime semantics differ. On coarse or unusual filesystems you can opt into a short digest window with `SERENA_V8_FRESHNESS_HASH_WINDOW_MS` (milliseconds), or enable strict hashing below.
+
+For filesystems or tooling that preserve both mtime and ctime, enable strict hashing:
+
+```bash
+export SERENA_V8_STRICT_FRESHNESS_HASH=1
+```
+
+Strict mode is correctness-first and costs more I/O on large repositories.
+
+## Telemetry and latency
+
+Per-workspace telemetry is written below:
+
+```text
+~/.serena-v8/stats/
+```
+
+List snapshots:
+
+```bash
+python -c "from pathlib import Path; print(*Path.home().glob('.serena-v8/stats/*.json'), sep='\n')"
+```
+
+The live dispatcher records total latency plus scheduler queue and execution stages. Use these values to distinguish scheduler contention from the actual semantic operation before changing concurrency limits.
+
+## Benchmark correctly
+
+The MCP latency benchmark requires an explicit executable and expected version so PATH mistakes cannot silently benchmark another Serena:
+
+```bash
+python benchmarks/mcp_latency_benchmark.py \
+  --project /absolute/path/to/project \
+  --tool list_dir \
+  --arguments '{"relative_path":".","recursive":false}' \
+  --rounds 10 \
+  --executable "$(command -v serena)" \
+  --expected-version 8.0.0a1 \
+  --expect-contains files
+```
+
+The report includes warm P50/P95/P99, startup/first-call latency, and RSS for the Serena process plus recursive child/LSP processes. Run `benchmarks/performance_suite.py` for the default multi-tool self-suite, and use `benchmarks/performance_gate.py` with a saved baseline to turn P50/P95/P99, startup, and process-tree RSS regressions into a failing CI/local check.
+
+## Roll back to upstream Serena
+
+Because V8 now uses the same distribution identity, rollback is a normal tool replacement rather than an uninstall dance:
+
+```bash
+uv tool install --force serena-agent
+serena --version
+```
+
+To return to V8 later:
+
+```bash
+uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+serena-v8-doctor
+```
+
+## Installation smoke test for contributors
+
+From the repository root:
+
+```bash
+./scripts/smoke-install.sh
+```
+
+The smoke test builds the wheel and verifies fresh install, migration from upstream Serena 1.7, rollback to upstream, forward migration back to V8, uninstall/reinstall, CLI identity, the installation doctor, a real MCP functional probe, and a semantic MCP probe in isolated uv tool directories.

@@ -1,6 +1,8 @@
+import hashlib
 import logging
 import os.path
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -313,7 +315,7 @@ class LanguageServerFileChangeNotifier:
     def __init__(self, project: "Project", language_server_manager: LanguageServerManager, initial_poll: bool = True) -> None:
         self._project = project
         self._language_server_manager = language_server_manager
-        self._freshness_last_seen_mtimes: dict[str, float] | None = None
+        self._freshness_last_seen_fingerprints: dict[str, tuple[int, int, int, bytes | None]] | None = None
         self._freshness_lock = threading.Lock()
 
         if initial_poll:
@@ -323,70 +325,85 @@ class LanguageServerFileChangeNotifier:
 
     def poll_and_notify(self) -> int:
         """
-        Detects source files that were changed, created or deleted on disk since the last call
-        and notifies every language server managed for this project via the LSP
-        ``workspace/didChangeWatchedFiles`` notification.
+        Detect source files changed, created or deleted since the last poll and
+        notify every active language server.
 
-        This exists because Serena's own file and symbol tools notify the language server inline
-        (via didOpen/didChange/didClose) when they edit a file, but edits made through any other
-        channel (another editor, a second agent, a git checkout, a build step) are otherwise
-        invisible to a warm language server, causing symbolic queries to answer from a stale index.
-
-        The set of files considered is exactly the set Serena itself tracks (see
-        :meth:`gather_source_files`), so no separate file-discovery logic has to be kept in sync.
-        The dominant cost is the directory walk plus one ``os.stat`` per tracked file; this is
-        intended to be called before symbolic tool invocations rather than on a timer.
-
-        :return: the number of change events sent (0 if nothing changed, if no language server is
-            running yet, or on the first call, which only establishes the baseline).
+        Stable POSIX files use metadata only: ctime_ns catches ordinary
+        content changes even when mtime is deliberately preserved. Files touched
+        within a short safety window also keep a digest, covering coarse timestamp
+        filesystems and edit races without hashing the whole stable workspace.
+        Windows and SERENA_V8_STRICT_FRESHNESS_HASH=1 hash every tracked file.
         """
-        current: dict[str, float] = {}
-        for rel_path in self._project.gather_source_files():
-            try:
-                current[rel_path] = os.stat(os.path.join(self._project.project_root, rel_path)).st_mtime
-            except OSError:
-                continue
-
-        # Read-diff-swap under the lock only; the filesystem walk above and the LSP notifications
-        # below stay outside it so concurrent callers do not serialize on I/O.
         with self._freshness_lock:
-            previous = self._freshness_last_seen_mtimes
-            self._freshness_last_seen_mtimes = current
+            previous = self._freshness_last_seen_fingerprints
+            current: dict[str, tuple[int, int, int, bytes | None]] = {}
+            events: list[tuple[str, FileChangeType]] = []
+            strict_hash = os.name == "nt" or os.getenv("SERENA_V8_STRICT_FRESHNESS_HASH", "").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            try:
+                hash_window_ms = max(0, int(os.getenv("SERENA_V8_FRESHNESS_HASH_WINDOW_MS", "2000")))
+            except ValueError:
+                hash_window_ms = 2000
+            hash_window_ns = hash_window_ms * 1_000_000
+            now_ns = time.time_ns()
+
+            for rel_path in self._project.gather_source_files():
+                path = os.path.join(self._project.project_root, rel_path)
+                try:
+                    stat = os.stat(path)
+                    metadata = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+                    prev = previous.get(rel_path) if previous is not None else None
+                    recent = now_ns - max(stat.st_mtime_ns, stat.st_ctime_ns) <= hash_window_ns
+                    needs_digest = strict_hash or recent or (prev is not None and prev[3] is not None)
+                    digest: bytes | None = None
+                    if needs_digest:
+                        with open(path, "rb") as source:
+                            digest = hashlib.file_digest(source, "sha256").digest()
+
+                    if previous is not None:
+                        if prev is None:
+                            events.append((rel_path, FileChangeType.Created))
+                        elif metadata != prev[:3] or (prev[3] is not None and digest != prev[3]):
+                            events.append((rel_path, FileChangeType.Changed))
+
+                    # Once a stable file has survived one digest comparison past
+                    # the hash window, stop reading its contents on every query.
+                    retained_digest = digest if strict_hash or recent else None
+                    current[rel_path] = (*metadata, retained_digest)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    # An unreadable file is not a deletion; keep its prior
+                    # fingerprint and retry on the next poll.
+                    if previous is not None and rel_path in previous:
+                        current[rel_path] = previous[rel_path]
+
+            if previous is not None:
+                events.extend((rel_path, FileChangeType.Deleted) for rel_path in previous if rel_path not in current)
+            self._freshness_last_seen_fingerprints = current
 
             if previous is None:
                 return 0
 
-            # compute the set of individual events (created, changed, deleted)
-            events: list[tuple[str, FileChangeType]] = []
-            for rel_path, mtime in current.items():
-                prev_mtime = previous.get(rel_path)
-                if prev_mtime is None:
-                    events.append((rel_path, FileChangeType.Created))
-                elif mtime > prev_mtime:
-                    events.append((rel_path, FileChangeType.Changed))
-            events.extend((rel_path, FileChangeType.Deleted) for rel_path in previous if rel_path not in current)
-
         if not events:
             return 0
 
-        # create the change didChangeWatchedFiles notification
         changes: list[FileEvent] = [
-            {"uri": Path(self._project.project_root, rel_path).resolve().as_uri(), "type": change_type} for rel_path, change_type in events
+            {"uri": Path(self._project.project_root, rel_path).resolve().as_uri(), "type": change_type}
+            for rel_path, change_type in events
         ]
         params: DidChangeWatchedFilesParams = {"changes": changes}
         created_paths = [rel_path for rel_path, change_type in events if change_type == FileChangeType.Created]
 
         for ls in self._language_server_manager.iter_language_servers():
-            # send the didChangeWatchedFiles notification to the language server
             try:
                 ls.server.notify.did_change_watched_files(params)
             except Exception as e:
                 log.error("Failed to notify language server of watched file changes", exc_info=e)
 
-            # A didChangeWatchedFiles(Created) notification alone is not enough for every backend
-            # (observed with pyright) to fold a brand-new file into its cross-file reference graph;
-            # an open/close cycle forces the parse+bind that Serena's own file tools trigger via
-            # SolidLanguageServer.open_file().
             for rel_path in created_paths:
                 if ls.is_ignored_path(rel_path, ignore_unsupported_files=True):
                     continue

@@ -79,7 +79,7 @@ def main():
     print("\n" + "=" * 60)
     
     # Save
-    out = Path.home() / "SuperProjects" / "serena-v8-fork" / "benchmarks" / "results" / f"quick_{int(time.time())}.json"
+    out = Path(__file__).resolve().parent / "results" / f"quick_{int(time.time())}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump({"timestamp": time.time(), "results": results}, f, indent=2)

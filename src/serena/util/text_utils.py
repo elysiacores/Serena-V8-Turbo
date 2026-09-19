@@ -1,19 +1,27 @@
 import hashlib
 import logging
+import os
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Self
 
 from bs4 import BeautifulSoup
-from joblib import Parallel, delayed
 from sensai.util.string import ToStringMixin
 
 from serena.util.file_proxy import FileCollection, FileProxy
 from solidlsp.ls_utils import TextUtils
 
 log = logging.getLogger(__name__)
+
+# Reused across search requests. Joblib created a new Parallel orchestration
+# layer per call; a bounded shared pool avoids repeated thread/scheduler setup
+# and prevents concurrent MCP searches from multiplying thread counts.
+_SEARCH_WORKERS = min(32, max(4, (os.cpu_count() or 1) * 2))
+_SEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=_SEARCH_WORKERS, thread_name_prefix="serena-search")
+_SEARCH_SERIAL_THRESHOLD = 8
 
 
 class LineType(StrEnum):
@@ -338,11 +346,12 @@ def search_files(
             log.debug(f"Error processing {relative_path}: {e}")
             return {"path": relative_path, "results": [], "error": str(e)}
 
-    # Execute in parallel using joblib
-    results = Parallel(
-        n_jobs=-1,
-        backend="threading",
-    )(delayed(process_single_file)(file_proxy) for file_proxy in file_collection)
+    # Avoid pool overhead for tiny searches; otherwise reuse one bounded
+    # process-wide pool. executor.map preserves input order.
+    if len(file_collection) < _SEARCH_SERIAL_THRESHOLD:
+        results = [process_single_file(file_proxy) for file_proxy in file_collection]
+    else:
+        results = list(_SEARCH_EXECUTOR.map(process_single_file, file_collection))
 
     # Collect results and errors
     matches = []

@@ -116,7 +116,7 @@ def main():
         print(f"Overall P95: {sorted(all_p95)[int(len(all_p95)*0.95)]:.1f}ms")
     
     # Save
-    out = Path.home() / "SuperProjects" / "serena-v8-fork" / "benchmarks" / "results" / f"warm_{args.workspace}_{int(time.time())}.json"
+    out = Path(__file__).resolve().parent / "results" / f"warm_{args.workspace}_{int(time.time())}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         json.dump({

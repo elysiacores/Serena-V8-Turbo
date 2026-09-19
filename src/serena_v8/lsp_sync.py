@@ -9,43 +9,26 @@ This module ensures:
 """
 
 import os
-import time
-import threading
 import logging
-from typing import Optional, List
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from serena.project import Project
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 
 class LSPDocumentSync:
-    """Notifies LSP of file changes and waits for processing."""
-    
-    def __init__(self):
-        self._lock = threading.Lock()
-    
-    def notify_changed(self, relative_path: str, project_root: str, timeout: float = 3.0) -> bool:
-        """Notify LSP that a file has changed."""
+    """Synchronize the existing active project's native language servers."""
+
+    def notify_changed(self, relative_path: str, project: "Project") -> bool:
+        """Never load a second project or create another language-server manager."""
         try:
-            from serena.project import Project
-            from serena.config.serena_config import SerenaConfig
-            
-            config_path = Path.home() / ".serena" / "serena_config.yml"
-            config = SerenaConfig.from_config_file(str(config_path), generate_if_missing=True)
-            project = Project.load(project_root, config)
-            ls_manager = project.get_language_server_manager_or_raise()
-            
-            # Find suitable language server
-            lang_server = ls_manager._get_suitable_language_server(relative_path)
-            if lang_server is None:
-                return True
-            
-            # Wait briefly for LSP to catch up
-            time.sleep(0.1)
+            project.get_language_server_manager_or_raise().sync_file_system_changes()
             return True
-            
-        except Exception as e:
-            log.warning(f"LSP sync failed for {relative_path}: {e}")
+        except Exception:
+            log.warning("LSP sync failed for %s", relative_path, exc_info=True)
             return False
 
 
@@ -177,64 +160,3 @@ def get_cache_invalidator() -> CacheInvalidator:
 
 def get_safety_guard() -> SafetyGuard:
     return _safety_guard
-
-
-def patch_editing_tools():
-    """
-    Monkey-patch editing tools to use V8 LSP sync + cache invalidation.
-    
-    This is called once at V8 startup.
-    """
-    try:
-        from serena.tools.file_tools import CreateTextFileTool, ReplaceContentTool, ReplaceInFilesTool
-        from serena.tools.symbol_tools import RenameSymbolTool, ReplaceSymbolBodyTool
-        
-        # Patch CreateTextFileTool
-        orig_create_apply = CreateTextFileTool.apply
-        def v8_create_apply(self, *args, **kwargs):
-            result = orig_create_apply(self, *args, **kwargs)
-            # Invalidate cache for created file
-            if hasattr(self, '_edited_relative_paths'):
-                for path in self._edited_relative_paths:
-                    _cache_invalidator.invalidate_file(path, self.agent.project.project_root)
-            return result
-        CreateTextFileTool.apply = v8_create_apply
-        
-        # Patch ReplaceContentTool
-        orig_replace_apply = ReplaceContentTool.apply
-        def v8_replace_apply(self, *args, **kwargs):
-            result = orig_replace_apply(self, *args, **kwargs)
-            if hasattr(self, '_edited_relative_paths'):
-                for path in self._edited_relative_paths:
-                    _cache_invalidator.invalidate_file(path, self.agent.project.project_root)
-            return result
-        ReplaceContentTool.apply = v8_replace_apply
-        
-        # Patch RenameSymbolTool with safety guard
-        orig_rename_apply = RenameSymbolTool.apply
-        def v8_rename_apply(self, *args, **kwargs):
-            # Verify symbol location before rename
-            symbol_name = kwargs.get('symbol_name', '')
-            relative_path = kwargs.get('relative_path', '')
-            if symbol_name and relative_path:
-                fresh = _safety_guard.resolve_symbol_fresh(
-                    symbol_name, relative_path, self.agent.project.project_root
-                )
-                if fresh is None:
-                    return f"ERROR: Symbol '{symbol_name}' not found at {relative_path}. File may have been edited. Use read_file to check current content."
-            return orig_rename_apply(self, *args, **kwargs)
-        RenameSymbolTool.apply = v8_rename_apply
-        
-        log.info("V8 editing tools patched successfully")
-        
-    except Exception as e:
-        log.warning(f"Failed to patch editing tools: {e}")
-
-
-# Auto-patch on import (with graceful fallback)
-try:
-    patch_editing_tools()
-except Exception as e:
-    # Circular import or missing deps — V8 runtime still works, just no LSP sync patches
-    import logging
-    logging.getLogger(__name__).warning(f"V8 editing tools patch deferred: {e}")

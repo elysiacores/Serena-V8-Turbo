@@ -456,15 +456,6 @@ class Project(ToStringMixin):
             paths_exclude_glob=paths_exclude_glob,
             multiline=multiline,
         )
-        return search_files(
-            file_collection,
-            pattern,
-            context_lines_before=context_lines_before,
-            context_lines_after=context_lines_after,
-            paths_include_glob=paths_include_glob,
-            paths_exclude_glob=paths_exclude_glob,
-            multiline=multiline,
-        )
 
     def retrieve_content_around_line(
         self, relative_file_path: str, line: int, context_lines_before: int = 0, context_lines_after: int = 0
@@ -613,12 +604,16 @@ class Project(ToStringMixin):
             self.language_server_manager.remove_language_server(ls_id)
 
     def ls_sync_file_system_changes(self) -> int:
-        """
-        Synchronizes file system changes with the project's associated language server(s), if applicable
-        """
-        if self.language_server_manager:
-            return self.language_server_manager.sync_file_system_changes()
-        return 0
+        """Synchronize external file changes and invalidate semantic cache on change."""
+        if not self.language_server_manager:
+            return 0
+        num_changes = self.language_server_manager.sync_file_system_changes()
+        if num_changes:
+            # Lazy import avoids project <-> symbol import cycles at module load.
+            from serena.symbol import _v8_symbol_cache
+
+            _v8_symbol_cache.invalidate_project(self.project_root)
+        return num_changes
 
     def shutdown(self, timeout: float = 2.0) -> None:
         if self.language_server_manager is not None:

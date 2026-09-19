@@ -1,6 +1,5 @@
 import inspect
 import json
-import time
 from abc import ABC
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -337,25 +336,6 @@ class Tool(Component):
         :param log_call: whether to log the tool call and its result
         :param catch_exceptions: whether to catch exceptions and return their messages as strings, instead of raising a ToolCallError
         """
-        v8_started_at = time.perf_counter()
-
-        def record_v8_call(*, error: bool = False, timeout: bool = False) -> None:
-            """Best-effort V8 telemetry; telemetry must never break a tool call."""
-            try:
-                from serena.v8_runtime import record_tool_call
-
-                project = self.agent.get_active_project()
-                project_root = project.project_root if project is not None else ""
-                record_tool_call(
-                    self.get_name(),
-                    (time.perf_counter() - v8_started_at) * 1000,
-                    error=error,
-                    timeout=timeout,
-                    project=project_root,
-                )
-            except Exception as telemetry_error:
-                log.debug(f"V8 telemetry update failed: {telemetry_error}")
-
         # obtain session ID and client info
         session_id = "global"
         if mcp_ctx is not None:
@@ -447,27 +427,39 @@ class Tool(Component):
         tool_call_error: ToolCallError
         timeout = self.agent.serena_config.tool_timeout
         try:
-            from serena_v8.scheduler import get_scheduler
+            from serena_v8.runtime.dispatcher import get_dispatcher
+
             active_project = self.agent.get_active_project()
             project_root = active_project.project_root if active_project is not None else ""
-            task_exec, _request_id = get_scheduler().submit(
-                self.get_name(), kwargs, project_root, task, timeout=timeout
+
+            def serialized_task() -> str:
+                # Mutations and unknown tools still share Serena's native serial
+                # queue with background project/LSP lifecycle work. Once this
+                # mutation starts, do not cancel its underlying thread on a
+                # timeout; the V8 dispatcher waits for a definitive result.
+                issue_task = getattr(self.agent, "issue_task", None)
+                if issue_task is None:
+                    return task()
+                queued = issue_task(task, name=f"Tool:{self.get_name()}", logged=False, timeout=None)
+                return queued.result(timeout=None, cancel_on_timeout=False)
+
+            return get_dispatcher().execute(
+                tool_name=self.get_name(),
+                args=kwargs,
+                project=project_root,
+                operation=task,
+                serialized_operation=serialized_task,
+                timeout=timeout,
             )
-            result = task_exec.result(timeout=timeout + 1)
-            record_v8_call()
-            return result
         except ToolCallError as e:
-            record_v8_call(error=True)
             tool_call_error = e
         except TimeoutError:
             msg = f"Tool execution timed out after {timeout} seconds. "
             log.error(msg)
-            record_v8_call(error=True, timeout=True)
             tool_call_error = ToolCallError(msg)
         except Exception as e:  # unexpected errors (exceptions in the task itself are caught and forwarded as ToolCallError)
             msg = f"{e.__class__.__name__}: {e}"
             log.error(msg)
-            record_v8_call(error=True)
             tool_call_error = ToolCallError(msg)
         if catch_exceptions:
             return tool_call_error.get_error_message()
@@ -626,7 +618,10 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tool_dict: dict[str, RegisteredTool] = {}
-        inclusion_predicate = lambda c: "apply" in c.__dict__  # include only concrete tool classes that implement apply
+
+        def inclusion_predicate(tool_class: type) -> bool:
+            return "apply" in tool_class.__dict__
+
         for cls in iter_subclasses(Tool, inclusion_predicate=inclusion_predicate):
             if not any(cls.__module__.startswith(pkg) for pkg in tool_packages):
                 continue

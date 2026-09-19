@@ -38,83 +38,74 @@ def scan_directory(
     relative_to: str | None = None,
     is_ignored_dir: Callable[[str], bool] | None = None,
     is_ignored_file: Callable[[str], bool] | None = None,
+    max_results: int | None = None,
+    limit_files_only: bool = False,
 ) -> ScanResult:
-    """
-    Scan directory with V8 safety:
-    - Don't follow symlinks
-    - Exclude .git, node_modules, .next-build, etc.
-    """
-    if is_ignored_file is None:
-        is_ignored_file = lambda x: False
-    if is_ignored_dir is None:
-        is_ignored_dir = lambda x: False
+    """Scan safely without following symlinks, with optional early termination.
 
-    files = []
-    directories = []
+    max_results collects at most one lookahead item beyond the requested
+    result limit. That is enough for callers to report truncation without
+    walking the rest of a large dependency/source tree.
+    """
+    explicit_dir_filter = is_ignored_dir is not None
+    is_ignored_file = is_ignored_file or (lambda _path: False)
+    is_ignored_dir = is_ignored_dir or (lambda _path: False)
 
+    files: list[str] = []
+    directories: list[str] = []
     abs_path = os.path.abspath(path)
     rel_base = os.path.abspath(relative_to) if relative_to else None
+    target_count = None if max_results is None else max(1, max_results) + 1
 
-    # V8: Exclude patterns
-    V8_EXCLUDED_DIRS = {
+    excluded_dirs = {
         ".git", "node_modules", "__pycache__", ".next", ".next-build",
         "dist", "build", ".cache", ".turbo", ".venv", "venv", "coverage",
         "vendor", "target", "tmp", "logs", "out", "generated", "generated_code",
     }
 
-    try:
-        with os.scandir(abs_path) as entries:
-            for entry in entries:
-                try:
-                    entry_path = entry.path
+    def count() -> int:
+        return len(files) if limit_files_only else len(files) + len(directories)
 
-                    # V8: Skip symlinks
-                    if entry.is_symlink():
-                        continue
-
-                    if rel_base:
-                        try:
-                            result_path = os.path.relpath(entry_path, rel_base)
-                        except:
-                            log.debug(f"Skipping entry due to relative path conversion error: {entry.path}")
+    stack = [abs_path]
+    while stack and (target_count is None or count() < target_count):
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if target_count is not None and count() >= target_count:
+                        break
+                    try:
+                        if entry.is_symlink():
                             continue
-                    else:
-                        result_path = entry_path
+                        entry_path = entry.path
+                        if rel_base:
+                            try:
+                                result_path = os.path.relpath(entry_path, rel_base)
+                            except (OSError, ValueError):
+                                log.debug("Skipping entry due to relative path conversion error: %s", entry_path)
+                                continue
+                        else:
+                            result_path = entry_path
 
-                    # V8: Skip excluded dirs
-                    entry_name = entry.name
-                    if entry_name in V8_EXCLUDED_DIRS:
-                        continue
-
-                    if entry.is_file(follow_symlinks=False):
-                        if not is_ignored_file(entry_path):
-                            files.append(result_path)
-                    elif entry.is_dir(follow_symlinks=False):
-                        if not is_ignored_dir(entry_path):
+                        if entry.is_file(follow_symlinks=False):
+                            if not is_ignored_file(entry_path):
+                                files.append(result_path)
+                        elif entry.is_dir(follow_symlinks=False):
+                            if entry.name in excluded_dirs and not explicit_dir_filter:
+                                continue
+                            if is_ignored_dir(entry_path):
+                                continue
                             directories.append(result_path)
                             if recursive:
-                                sub_result = scan_directory(
-                                    entry_path,
-                                    recursive=True,
-                                    relative_to=relative_to,
-                                    is_ignored_dir=is_ignored_dir,
-                                    is_ignored_file=is_ignored_file,
-                                )
-                                files.extend(sub_result.files)
-                                directories.extend(sub_result.directories)
-                except PermissionError as ex:
-                    log.debug(f"Skipping entry due to permission error: {entry.path}", exc_info=ex)
-                    continue
-                except OSError as ex:
-                    # V8: Handle "Too many levels of symbolic links"
-                    log.debug(f"Skipping entry due to OS error: {entry.path}: {ex}")
-                    continue
-    except PermissionError as ex:
-        log.debug(f"Skipping directory due to permission error: {abs_path}", exc_info=ex)
-        return ScanResult([], [])
-    except OSError as ex:
-        log.debug(f"Skipping directory due to OS error: {abs_path}: {ex}")
-        return ScanResult([], [])
+                                stack.append(entry_path)
+                    except PermissionError as ex:
+                        log.debug("Skipping entry due to permission error: %s", entry.path, exc_info=ex)
+                    except OSError as ex:
+                        log.debug("Skipping entry due to OS error: %s: %s", entry.path, ex)
+        except PermissionError as ex:
+            log.debug("Skipping directory due to permission error: %s", directory, exc_info=ex)
+        except OSError as ex:
+            log.debug("Skipping directory due to OS error: %s: %s", directory, ex)
 
     return ScanResult(directories, files)
 

@@ -8,7 +8,9 @@ Improvements over Serena 1.7.0:
 4. Bounded worker pool with proper queue/backpressure
 """
 
-__version__ = "8.0.0-alpha.1"
+from serena_v8._version import VERSION
+
+__version__ = VERSION
 
 import os
 import sys
