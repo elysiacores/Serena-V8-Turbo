@@ -160,7 +160,28 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(indexer.status(job_id)["job_id"], job_id)
             indexer.shutdown()
 
-    def test_index_reports_stale_after_workspace_file_changes(self):
+    def test_full_then_incremental_keeps_workspace_snapshot(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = Path(root) / "first.py"
+            second = Path(root) / "second.py"
+            first.write_text("a = 1\n")
+            second.write_text("b = 1\n")
+            config = SidecarConfig.from_environment(root, environ={})
+
+            def executor(command, **kwargs):
+                if "--path" in command:
+                    db_path = Path(command[command.index("--path") + 1])
+                    db_path.mkdir(parents=True, exist_ok=True)
+                return 0, "indexed", ""
+
+            runner = SidecarRunner(config, executor=executor)
+            indexer = WorkspaceCgcIndexer(runner)
+            self.assertEqual(indexer.wait(indexer.submit(path="."), timeout=2)["state"], "completed")
+            self.assertEqual(indexer.wait(indexer.submit(path="first.py"), timeout=2)["state"], "completed")
+            second.write_text("b = 2\n")
+            self.assertEqual(indexer.stale_paths(), ["second.py"])
+            indexer.shutdown()
+
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "sample.py"
             path.write_text("def value():\n    return 1\n")

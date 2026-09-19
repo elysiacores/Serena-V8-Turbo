@@ -949,13 +949,13 @@ class SolidLanguageServer(ABC):
             )
             if diagnostics is None:
                 break
-            if self._accept_published_diagnostics(diagnostics):
-                return diagnostics
-            current_after_generation = self._get_published_diagnostics_generation(uri)
+            # An empty publication is a valid, current "no diagnostics" result.
+            # The generation check above already proves it is newer than the request.
+            return diagnostics
 
         if allow_cached:
             diagnostics = self._get_cached_published_diagnostics(uri)
-            if diagnostics is not None and self._accept_published_diagnostics(diagnostics):
+            if diagnostics is not None:
                 return diagnostics
 
         return None
@@ -1025,7 +1025,7 @@ class SolidLanguageServer(ABC):
                         new_item["source"] = item["source"]
                     ret.append(ls_types.Diagnostic(**new_item))
 
-            if not ret:
+            if response is None:
                 published_diagnostics = self._wait_for_relevant_published_diagnostics(
                     uri=published_uri,
                     after_generation=diagnostics_before_request,
