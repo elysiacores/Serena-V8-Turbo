@@ -6,6 +6,59 @@ from serena.agent import SerenaAgent
 
 
 class SingleProjectInvariantTests(unittest.TestCase):
+    def test_duplicate_name_matching_active_project_is_safe_noop(self):
+        agent = object.__new__(SerenaAgent)
+
+        class ActiveProject:
+            project_name = "tp-copydesign"
+            project_root = "/home/user/SuperProjects/tp-copydesign"
+
+            def shutdown(self, timeout=2.0):
+                return None
+
+        class Config:
+            def get_project(self, value):
+                if value == "tp-copydesign":
+                    raise ValueError("Multiple projects found with name 'tp-copydesign'")
+                return None
+
+        agent._active_project = ActiveProject()
+        agent._gui_log_viewer = None
+        agent._dashboard_manager = None
+        agent.serena_config = Config()
+
+        with patch.dict(os.environ, {"SERENA_V8_SINGLE_PROJECT": "1"}):
+            with patch.object(agent, "_activate_project", return_value=False) as activate:
+                result = agent.activate_project_from_path_or_name("tp-copydesign")
+
+        self.assertFalse(result)
+        activate.assert_called_once()
+
+    def test_duplicate_name_not_matching_active_project_still_rejects(self):
+        agent = object.__new__(SerenaAgent)
+
+        class ActiveProject:
+            project_name = "workspace-a"
+            project_root = "/tmp/test-workspace-a"
+
+            def shutdown(self, timeout=2.0):
+                return None
+
+        class Config:
+            def get_project(self, value):
+                if value == "tp-copydesign":
+                    raise ValueError("Multiple projects found with name 'tp-copydesign'")
+                return None
+
+        agent._active_project = ActiveProject()
+        agent._gui_log_viewer = None
+        agent._dashboard_manager = None
+        agent.serena_config = Config()
+
+        with patch.dict(os.environ, {"SERENA_V8_SINGLE_PROJECT": "1"}):
+            with self.assertRaisesRegex(ValueError, "Multiple projects found"):
+                agent.activate_project_from_path_or_name("tp-copydesign")
+
     def test_project_started_with_folder_rejects_switch_to_another_folder(self):
         agent = object.__new__(SerenaAgent)
 

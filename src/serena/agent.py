@@ -1346,14 +1346,24 @@ class SerenaAgent:
 
         :return: True if the project was newly activated, False if it was already active
         """
+        # Resolve the project once.  If a duplicate name refers to the
+        # already-active project, it is a safe no-op; otherwise preserve the
+        # ambiguity error instead of selecting a project arbitrarily.
+        try:
+            project_instance: Project | None = self.serena_config.get_project(project_root_or_name)
+        except ValueError:
+            if self._active_project is not None and project_root_or_name == self._active_project.project_name:
+                project_instance = self._active_project
+            else:
+                raise
+
         # A Tunnel launched with a fixed --project owns exactly one folder.
         # Keep the normal tool registry, but reject cross-folder activation so
         # project state, LSP processes, cache, and telemetry cannot cross wires.
         if os.environ.get("SERENA_V8_SINGLE_PROJECT") == "1" and self._active_project is not None:
-            requested_project = self.serena_config.get_project(project_root_or_name)
             requested_root = None
-            if requested_project is not None:
-                requested_root = requested_project.project_root
+            if project_instance is not None:
+                requested_root = project_instance.project_root
             elif os.path.isdir(project_root_or_name):
                 requested_root = project_root_or_name
             if requested_root is not None:
@@ -1365,7 +1375,6 @@ class SerenaAgent:
                         f"Active folder: {active_root}"
                     )
 
-        project_instance: Project | None = self.serena_config.get_project(project_root_or_name)
         if project_instance is not None:
             log.info(f"Found registered project '{project_instance.project_name}' at path {project_instance.project_root}")
         elif os.path.isdir(project_root_or_name):
