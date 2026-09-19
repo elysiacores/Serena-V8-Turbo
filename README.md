@@ -250,6 +250,36 @@ python -c "from pathlib import Path; print(*Path.home().glob('.serena-v8/stats/*
 cat ~/.serena-v8/watchdog-status.json
 ```
 
+## Optional CGC and ast-grep Sidecars
+
+V8 can use CGC and ast-grep as isolated, read-only sidecars without replacing
+Serena's native LSP, cache, editing, or Workspace ownership. Sidecars run in the
+active canonical Workspace only, use bounded subprocess deadlines, cap output,
+and return `unavailable` when their executable or configuration is absent.
+
+Install ast-grep separately if desired:
+
+```bash
+uv tool install ast-grep-cli
+```
+
+Configure the optional MCP tools per installation:
+
+```bash
+export SERENA_V8_AST_GREP_BIN="ast-grep"
+export SERENA_V8_SIDECAR_TIMEOUT_MS="5000"
+export SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES="5242880"
+# CGC is intentionally an explicit command template supplied by the user:
+export SERENA_V8_CGC_COMMAND="cgc query --project {workspace_root}"
+```
+
+The optional tools are `ast_grep_search` and `cgc_query`. CGC command syntax is
+not assumed by V8 because deployments may expose different CGC CLIs. Do not put
+real Workspace paths, credentials, or project-specific configuration in the
+repository. Sidecars must remain read-only until a future mutation workflow
+proves diff review, rollback, cache invalidation, LSP synchronization, and
+post-edit diagnostics.
+
 ## 📊 Monitoring
 
 ### Watchdog (Auto-Restart)
