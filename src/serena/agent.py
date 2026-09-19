@@ -807,6 +807,16 @@ class SerenaAgent:
                 )
             )
             tool_inclusion_definitions.append(project.project_config)
+        elif project is not None and project.project_config.included_optional_tools:
+            # A startup project may provide optional tools even in contexts that
+            # are not marked single-project. Only its own inclusion list is
+            # applied; project exclusions remain dynamic-context behavior.
+            tool_inclusion_definitions.append(
+                NamedToolInclusionDefinition(
+                    name="StartupProjectOptionalTools",
+                    included_optional_tools=project.project_config.included_optional_tools,
+                )
+            )
 
         # compute the resulting tool set
         base_toolset = ToolSet.default().apply(*tool_inclusion_definitions)
