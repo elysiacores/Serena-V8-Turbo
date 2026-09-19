@@ -165,6 +165,9 @@ class SerenaMCPFactory:
         self.transport = transport
         self.context = SerenaAgentContext.load(context)
         self.project = project
+        if project is not None:
+            # A fixed --project command represents one Tunnel/one folder.
+            os.environ.setdefault("SERENA_V8_SINGLE_PROJECT", "1")
         self.agent: SerenaAgent | None = None
         self.memory_log_handler = memory_log_handler
 

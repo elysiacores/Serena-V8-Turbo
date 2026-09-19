@@ -1346,6 +1346,25 @@ class SerenaAgent:
 
         :return: True if the project was newly activated, False if it was already active
         """
+        # A Tunnel launched with a fixed --project owns exactly one folder.
+        # Keep the normal tool registry, but reject cross-folder activation so
+        # project state, LSP processes, cache, and telemetry cannot cross wires.
+        if os.environ.get("SERENA_V8_SINGLE_PROJECT") == "1" and self._active_project is not None:
+            requested_project = self.serena_config.get_project(project_root_or_name)
+            requested_root = None
+            if requested_project is not None:
+                requested_root = requested_project.project_root
+            elif os.path.isdir(project_root_or_name):
+                requested_root = project_root_or_name
+            if requested_root is not None:
+                active_root = os.path.realpath(os.path.abspath(self._active_project.project_root))
+                requested_root = os.path.realpath(os.path.abspath(requested_root))
+                if requested_root != active_root:
+                    raise ValueError(
+                        "This is a single-project tunnel; cross-project activation is not allowed. "
+                        f"Active folder: {active_root}"
+                    )
+
         project_instance: Project | None = self.serena_config.get_project(project_root_or_name)
         if project_instance is not None:
             log.info(f"Found registered project '{project_instance.project_name}' at path {project_instance.project_root}")

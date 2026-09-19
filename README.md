@@ -78,7 +78,7 @@ These are **measured production-overlay benchmarks**, not synthetic figures. The
 | 7 | Pipe/502 hardening + watchdog | **Live** |
 | 8 | P50/P95 telemetry and runtime metrics | **Live** |
 | 9 | Response optimization modules | Diagnostic/experimental; not enabled globally |
-| 10 | Multi-Workspace integration verification | **Live: 19 tests + 5/5 MCP probes** |
+| 10 | Multi-Workspace integration verification | **Live: 20 tests + 4/4 MCP probes** |
 | 8.5 | Correctness: LSP sync, cache invalidation, edit safety | **Live** |
 | 8.8 | Production wiring, MCP probe, auth circuit breaker | **Live** |
 
@@ -94,6 +94,16 @@ The drop-in production path is the normal `serena start-mcp-server --transport s
 - an `AUTH_BLOCKED` state for tunnel authorization failures, with restart suppression because restarts cannot grant permission.
 
 The standalone V8 daemon/index/cache modules remain diagnostic/experimental components and are not silently presented as part of the live MCP path. This preserves drop-in compatibility and avoids replacing Serena's authoritative LSP and project lifecycle.
+
+### Tunnel isolation invariant
+
+Each production Tunnel is intentionally single-project:
+
+```text
+1 Tunnel ID = 1 Serena process = 1 active folder = 1 LSP/cache/telemetry state
+```
+
+A Serena process started with `--project <folder>` rejects attempts to activate a different project. Multiple folders must use separate Tunnel IDs and separate Serena processes. This prevents cross-project cache, LSP, telemetry, and edit state from being mixed.
 
 ### Current verified release
 
