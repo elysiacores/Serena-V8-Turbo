@@ -1,5 +1,6 @@
 import inspect
 import json
+import time
 from abc import ABC
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -336,6 +337,25 @@ class Tool(Component):
         :param log_call: whether to log the tool call and its result
         :param catch_exceptions: whether to catch exceptions and return their messages as strings, instead of raising a ToolCallError
         """
+        v8_started_at = time.perf_counter()
+
+        def record_v8_call(*, error: bool = False, timeout: bool = False) -> None:
+            """Best-effort V8 telemetry; telemetry must never break a tool call."""
+            try:
+                from serena.v8_runtime import record_tool_call
+
+                project = self.agent.get_active_project()
+                project_root = project.project_root if project is not None else ""
+                record_tool_call(
+                    self.get_name(),
+                    (time.perf_counter() - v8_started_at) * 1000,
+                    error=error,
+                    timeout=timeout,
+                    project=project_root,
+                )
+            except Exception as telemetry_error:
+                log.debug(f"V8 telemetry update failed: {telemetry_error}")
+
         # obtain session ID and client info
         session_id = "global"
         if mcp_ctx is not None:
@@ -424,16 +444,21 @@ class Tool(Component):
         timeout = self.agent.serena_config.tool_timeout
         try:
             task_exec = self.agent.issue_task(task, name=self.__class__.__name__, timeout=timeout)
-            return task_exec.result(timeout=timeout)
+            result = task_exec.result(timeout=timeout)
+            record_v8_call()
+            return result
         except ToolCallError as e:
+            record_v8_call(error=True)
             tool_call_error = e
         except TimeoutError:
             msg = f"Tool execution timed out after {timeout} seconds. "
             log.error(msg)
+            record_v8_call(error=True, timeout=True)
             tool_call_error = ToolCallError(msg)
         except Exception as e:  # unexpected errors (exceptions in the task itself are caught and forwarded as ToolCallError)
             msg = f"{e.__class__.__name__}: {e}"
             log.error(msg)
+            record_v8_call(error=True)
             tool_call_error = ToolCallError(msg)
         if catch_exceptions:
             return tool_call_error.get_error_message()

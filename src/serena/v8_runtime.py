@@ -192,7 +192,7 @@ def get_memory_info() -> dict:
             "num_threads": proc.num_threads(),
             "cpu_percent": proc.cpu_percent(),
             "open_files": len(proc.open_files()),
-            "connections": len(proc.connections()),
+            "connections": len(proc.net_connections()),
         }
     except ImportError:
         return {"error": "psutil not available"}
@@ -283,3 +283,59 @@ _v8_query_cache = V8QueryCache()
 
 def get_query_cache() -> V8QueryCache:
     return _v8_query_cache
+
+
+def write_v8_stats(stats_path: Path | str | None = None) -> Path:
+    """Write one authoritative runtime snapshot atomically.
+
+    The symbol cache is imported lazily to avoid the serena package import
+    cycle that previously prevented the MCP server from starting.
+    """
+    from serena.symbol import _v8_symbol_cache
+
+    path = Path(stats_path) if stats_path is not None else Path.home() / ".serena-v8" / "stats.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry_stats = _v8_telemetry.stats()
+    payload = {
+        "timestamp": time.time(),
+        "identity": get_v8_identity(),
+        "cache": {
+            "symbol_cache": _v8_symbol_cache.stats(),
+            "query_cache": _v8_query_cache.stats(),
+        },
+        "metrics": {
+            "total": telemetry_stats.get("total_requests", telemetry_stats.get("total", 0)),
+            "errors": telemetry_stats.get("errors", 0),
+            "timeouts": telemetry_stats.get("timeouts", 0),
+            "p50_ms": telemetry_stats.get("total_ms", {}).get("p50", 0),
+            "p95_ms": telemetry_stats.get("total_ms", {}).get("p95", 0),
+            "tools": _v8_telemetry.tool_breakdown(),
+        },
+        "memory": get_memory_info(),
+    }
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    os.replace(temp_path, path)
+    return path
+
+
+def record_tool_call(
+    tool_name: str,
+    elapsed_ms: float,
+    *,
+    error: bool = False,
+    timeout: bool = False,
+    project: str = "",
+    stats_path: Path | str | None = None,
+) -> None:
+    """Record a completed MCP tool call and refresh the V8 status file."""
+    _v8_telemetry.record(
+        {
+            "tool": tool_name,
+            "project": project,
+            "total_ms": round(elapsed_ms, 3),
+            "error": error,
+            "timeout": timeout,
+        }
+    )
+    write_v8_stats(stats_path)

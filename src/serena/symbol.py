@@ -69,6 +69,11 @@ class _V8QueryCache:
             for k in to_remove:
                 del self._cache[k]
 
+    def clear(self):
+        """Invalidate every cached semantic query after a structural edit."""
+        with self._lock:
+            self._cache.clear()
+
     def stats(self):
         total = self.hits + self.misses
         return {
@@ -80,6 +85,12 @@ class _V8QueryCache:
 
 
 _v8_symbol_cache = _V8QueryCache(max_entries=500, ttl_seconds=1800)
+
+
+def make_v8_cache_key(operation: str, project_root: str, *parts: object) -> str:
+    """Build a stable, project-isolated key using the canonical project path."""
+    canonical_root = os.path.realpath(os.path.abspath(project_root))
+    return ":".join([operation, canonical_root, *(str(part) for part in parts)])
 
 
 @dataclass
@@ -801,7 +812,15 @@ class LanguageServerSymbolRetriever:
         V8: Added query-result cache with TTL/LRU.
         """
         # V8: Check cache first
-        cache_key = f"find:{id(self.project)}:{name_path_pattern}:{include_kinds}:{exclude_kinds}:{substring_matching}:{within_relative_path}"
+        cache_key = make_v8_cache_key(
+            "find",
+            self.project.project_root,
+            name_path_pattern,
+            include_kinds,
+            exclude_kinds,
+            substring_matching,
+            within_relative_path,
+        )
         cached = _v8_symbol_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -914,7 +933,16 @@ class LanguageServerSymbolRetriever:
         :return: a list of symbols that reference the given symbol
         """
         # V8: Check cache
-        cache_key = f"refs:{id(self.project)}:{symbol_location.relative_path}:{symbol_location.line}:{symbol_location.column}:{include_body}:{include_kinds}:{exclude_kinds}"
+        cache_key = make_v8_cache_key(
+            "refs",
+            self.project.project_root,
+            symbol_location.relative_path,
+            symbol_location.line,
+            symbol_location.column,
+            include_body,
+            include_kinds,
+            exclude_kinds,
+        )
         cached = _v8_symbol_cache.get(cache_key)
         if cached is not None:
             return cached

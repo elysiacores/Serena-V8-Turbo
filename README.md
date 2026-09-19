@@ -73,6 +73,9 @@ SERENA_SITE=$(python -c "import serena; import os; print(os.path.dirname(serena.
 cp -r src/serena/* "$SERENA_SITE/"
 cp -r src/serena_v8 "$SERENA_SITE/../"
 
+# Remove legacy stats writers if an older V8 overlay installed one.
+mv "$SERENA_SITE/sitecustomize.py" "$SERENA_SITE/sitecustomize.py.disabled" 2>/dev/null || true
+
 # 4. Create node symlinks (if using svelte/typescript LSP)
 ln -sf $(which node) ~/.local/bin/node
 ln -sf $(which npm) ~/.local/bin/npm
@@ -144,8 +147,10 @@ web_dashboard: false
 language_servers:
   - svelte  # or typescript, go, etc.
 
-# IMPORTANT: Set to false for V8 to see node_modules
-ignore_all_files_in_gitignore: false
+# Keep dependency/build trees out of Serena's symbol index. LSP resolves
+# dependencies through its own workspace, so Serena does not need to enumerate
+# node_modules itself.
+ignore_all_files_in_gitignore: true
 
 # Exclude heavy build artifacts
 ignored_paths:
@@ -154,6 +159,8 @@ ignored_paths:
   - "**/build/**"
   - "**/.cache/**"
   - "**/vendor/**"
+  - "**/.git/**"
+  - "**/node_modules/**"
 ```
 
 ### Tunnel Service File
@@ -177,7 +184,7 @@ serena --version
 # Runtime identity
 python -c "import serena; print(serena.get_v8_identity())"
 
-# Cache/metrics stats
+# Cache/metrics stats (written by live MCP tool calls)
 cat ~/.serena-v8/stats.json
 
 # Watchdog status
@@ -188,10 +195,11 @@ cat ~/.serena-v8/watchdog-status.json
 
 ### Watchdog (Auto-Restart)
 
-V8 includes `workspace-watchdog-v8.py` — monitors tunnels every 30s, auto-restarts on failure, collects logs:
+V8 includes `workspace-watchdog-v8.py` — monitors systemd, local health, MCP
+processes, control-plane poll freshness, and OOM/authorization errors every 30s:
 
 ```bash
-python3 ~/SuperProjects/workspace-watchdog-v8.py &
+systemctl --user enable --now serena-v8-watchdog.service
 ```
 
 ### Logs
@@ -216,7 +224,9 @@ cat ~/.serena-v8/logs/watchdog.log
 | `Too many levels of symbolic links` | `scan_directory` follows symlinks | Fixed in V8 — `follow_symlinks=False` |
 | `rename_symbol` edits wrong line | LSP has stale file version | Fixed in V8 — LSP sync + cache invalidation |
 | Tunnel crash loop | Circular import in `__init__.py` | Fixed in V8 — lazy imports |
-| `find_symbol` slow (2-3s) | V8 cache not loading | Check `~/.serena-v8/stats.json` — should show hits > 0 |
+| `stats.json` remains at zero | Legacy `sitecustomize.py` is overwriting it | Rename it to `sitecustomize.py.disabled`, restart Serena processes, then make a live MCP tool call |
+| `find_symbol` slow (2-3s) | Cold LSP/index startup | Check live `metrics.tools` and cache hits after repeated calls |
+| `tunnel_use_forbidden` / `401 Unauthorized` | Tunnel belongs to another OpenAI org/workspace | Use a runtime key with access or recreate the tunnel in the owning org; restarting cannot fix authorization |
 | `server/discover` pydantic error | Protocol mismatch (old wrapper script) | Use `serena start-mcp-server` directly, not wrapper |
 
 ## 🏗️ Architecture

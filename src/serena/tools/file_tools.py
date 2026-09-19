@@ -84,6 +84,10 @@ class CreateTextFileTool(EditingToolWithDiagnostics):
             # writing the file
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
+            from serena.symbol import _v8_symbol_cache
+
+            _v8_symbol_cache.clear()
+            self.project.ls_sync_file_system_changes()
             answer = f"File created: {relative_path}."
             if will_overwrite_existing:
                 answer += " Overwrote existing file."

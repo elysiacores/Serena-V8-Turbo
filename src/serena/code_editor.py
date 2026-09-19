@@ -21,6 +21,7 @@ TSymbol = TypeVar("TSymbol", bound=Symbol)
 
 class CodeEditor(Generic[TSymbol], ABC):
     def __init__(self, project: Project) -> None:
+        self.project = project
         self.project_root = project.project_root
         self.encoding = project.project_config.encoding
         self.newline = project.line_ending.newline_str
@@ -91,6 +92,12 @@ class CodeEditor(Generic[TSymbol], ABC):
         new_contents = edited_file.get_contents()
         with open(abs_path, "w", encoding=self.encoding, newline=self.newline) as f:
             f.write(new_contents)
+        # Structural edits invalidate repo-wide symbol results as well as
+        # file-scoped results, so clear the semantic cache atomically.
+        from serena.symbol import _v8_symbol_cache
+
+        _v8_symbol_cache.clear()
+        self.project.ls_sync_file_system_changes()
 
     @abstractmethod
     def _find_unique_symbol(self, name_path: str, relative_file_path: str) -> TSymbol:
