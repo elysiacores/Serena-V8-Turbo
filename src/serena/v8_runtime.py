@@ -269,6 +269,15 @@ class V8QueryCache:
                 self._current_bytes -= self._cache[k].get("size", 0)
                 del self._cache[k]
     
+    def invalidate_project_file(self, file_path: str, project_root: str):
+        """Invalidate all query results for one canonical workspace only."""
+        canonical = os.path.realpath(os.path.abspath(project_root))
+        marker = f":{canonical}:"
+        with self._lock:
+            for key in [key for key in self._cache if marker in key]:
+                self._current_bytes -= self._cache[key].get("size", 0)
+                del self._cache[key]
+
     def stats(self):
         total = self.hits + self.misses
         return {

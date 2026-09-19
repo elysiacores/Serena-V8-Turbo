@@ -55,19 +55,18 @@ class CacheInvalidator:
     @staticmethod
     def invalidate_file(relative_path: str, project_root: str):
         """Invalidate all caches for a file."""
-        # Invalidate V8 symbol cache
         try:
             from serena.symbol import _v8_symbol_cache
-            _v8_symbol_cache.invalidate_file(relative_path)
-        except Exception:
-            pass
-        
-        # Invalidate V8 query cache for this project
+            _v8_symbol_cache.invalidate_project_file(relative_path, project_root)
+        except Exception as exc:
+            log.debug("V8 symbol cache invalidation skipped: %s", exc)
+
+        # Invalidate V8 query cache for this workspace only.
         try:
             from serena.v8_runtime import _v8_query_cache
-            _v8_query_cache.invalidate_prefix(f"{project_root}:")
-        except Exception:
-            pass
+            _v8_query_cache.invalidate_project_file(relative_path, project_root)
+        except Exception as exc:
+            log.debug("V8 query cache invalidation skipped: %s", exc)
 
 
 class SafetyGuard:

@@ -92,11 +92,10 @@ class CodeEditor(Generic[TSymbol], ABC):
         new_contents = edited_file.get_contents()
         with open(abs_path, "w", encoding=self.encoding, newline=self.newline) as f:
             f.write(new_contents)
-        # Structural edits invalidate repo-wide symbol results as well as
-        # file-scoped results, so clear the semantic cache atomically.
+        # Structural edits invalidate this workspace's semantic results, not
+        # unrelated workspaces sharing the process.
         from serena.symbol import _v8_symbol_cache
-
-        _v8_symbol_cache.clear()
+        _v8_symbol_cache.invalidate_project_file(edited_file.relative_path, self.project_root)
         self.project.ls_sync_file_system_changes()
 
     @abstractmethod

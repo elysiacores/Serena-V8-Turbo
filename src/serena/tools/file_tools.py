@@ -86,7 +86,7 @@ class CreateTextFileTool(EditingToolWithDiagnostics):
             abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
             from serena.symbol import _v8_symbol_cache
 
-            _v8_symbol_cache.clear()
+            _v8_symbol_cache.invalidate_project_file(relative_path, project_root)
             self.project.ls_sync_file_system_changes()
             answer = f"File created: {relative_path}."
             if will_overwrite_existing:

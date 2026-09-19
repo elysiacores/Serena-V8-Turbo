@@ -69,8 +69,16 @@ class _V8QueryCache:
             for k in to_remove:
                 del self._cache[k]
 
+    def invalidate_project_file(self, file_path: str, project_root: str):
+        """Invalidate semantic results for one workspace, preserving others."""
+        canonical = os.path.realpath(os.path.abspath(project_root))
+        marker = f":{canonical}:"
+        with self._lock:
+            for key in [key for key in self._cache if marker in key]:
+                del self._cache[key]
+
     def clear(self):
-        """Invalidate every cached semantic query after a structural edit."""
+        """Clear all projects; reserved for explicit cache reset."""
         with self._lock:
             self._cache.clear()
 

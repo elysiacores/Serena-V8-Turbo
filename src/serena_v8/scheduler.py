@@ -11,6 +11,7 @@ Features:
 
 import time
 import threading
+import json
 from enum import Enum
 from typing import Any, Callable, Optional, Dict, Tuple
 from dataclasses import dataclass, field
@@ -114,7 +115,8 @@ class SmartScheduler:
         self._configs = lane_configs or LANE_CONFIGS
         self._lanes: Dict[Lane, list] = {lane: [] for lane in Lane}
         self._active: Dict[Lane, int] = {lane: 0 for lane in Lane}
-        self._lock = threading.Lock()
+        # Dispatch and completion can recursively dispatch the next request.
+        self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         
         # Single-flight deduplication
@@ -180,11 +182,25 @@ class SmartScheduler:
             
             # Add to queue
             self._lanes[lane].append(request)
+            timer = threading.Timer(timeout, self._timeout_request, args=(request,))
+            timer.daemon = True
+            timer.start()
             
             # Dispatch if capacity available
             self._try_dispatch(lane)
             
             return future, request_id
+
+    def _timeout_request(self, request: ScheduledRequest):
+        """Fail a request at its deadline without killing its worker thread."""
+        with self._lock:
+            if request.future.done():
+                return
+            request.cancelled = True
+            self._total_timeout += 1
+            request.future.set_exception(TimeoutError(
+                f"{request.tool} exceeded {self._configs[request.lane].timeout}s deadline"
+            ))
     
     def _try_dispatch(self, lane: Lane):
         """Try to dispatch queued requests in a lane."""
@@ -211,31 +227,27 @@ class SmartScheduler:
     
     def _execute(self, request: ScheduledRequest):
         """Execute a scheduled request."""
+        result = None
+        error = None
         try:
-            # Check deadline
             if request.cancelled:
                 return
-            
-            # Execute
             result = request.fn()
-            
-            if not request.cancelled:
-                request.future.set_result(result)
-                
-        except Exception as e:
-            if not request.cancelled:
-                request.future.set_exception(e)
+        except Exception as exc:
+            error = exc
         finally:
             with self._lock:
                 self._active[request.lane] -= 1
-                
-                # Clean up single-flight
                 key = self._single_flight_key(request.tool, request.args, request.project)
                 if key in self._in_flight and self._in_flight[key] is request.future:
                     del self._in_flight[key]
-                
-                # Try to dispatch more
                 self._try_dispatch(request.lane)
+        # Publish completion after the lane accounting is consistent.
+        if not request.cancelled and not request.future.done():
+            if error is not None:
+                request.future.set_exception(error)
+            else:
+                request.future.set_result(result)
     
     def cancel(self, request_id: str) -> bool:
         """Cancel a request by ID."""
@@ -328,6 +340,3 @@ def get_scheduler() -> SmartScheduler:
         if _scheduler is None:
             _scheduler = SmartScheduler()
         return _scheduler
-
-
-import json

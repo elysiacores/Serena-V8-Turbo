@@ -443,8 +443,13 @@ class Tool(Component):
         tool_call_error: ToolCallError
         timeout = self.agent.serena_config.tool_timeout
         try:
-            task_exec = self.agent.issue_task(task, name=self.__class__.__name__, timeout=timeout)
-            result = task_exec.result(timeout=timeout)
+            from serena_v8.scheduler import get_scheduler
+            active_project = self.agent.get_active_project()
+            project_root = active_project.project_root if active_project is not None else ""
+            task_exec, _request_id = get_scheduler().submit(
+                self.get_name(), kwargs, project_root, task, timeout=timeout
+            )
+            result = task_exec.result(timeout=timeout + 1)
             record_v8_call()
             return result
         except ToolCallError as e:

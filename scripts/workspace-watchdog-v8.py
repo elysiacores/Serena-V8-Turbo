@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import select
 import signal
 import socket
 import subprocess
@@ -17,7 +19,16 @@ CHECK_INTERVAL = 30
 RESTART_COOLDOWN = 60
 MAX_RESTARTS_PER_HOUR = 5
 MAX_POLL_AGE_SECONDS = 90
+FUNCTIONAL_PROBE_INTERVAL_SECONDS = 300
 LOG_DIR = Path.home() / ".serena-v8" / "logs"
+
+MCP_PROBE_PROJECTS = {
+    "inspi365-tunnel.service": "/home/user/SuperProjects/inspi365",
+    "tp-tunnel.service": "/home/user/SuperProjects/tp-copydesign",
+    "tummun-tunnel.service": "/home/user/SuperProjects/tummun/tummun",
+    "makinni-tunnel.service": "/home/user/SuperProjects/makinni/makinni",
+    "tpos-tunnel.service": "/home/user/SuperProjects/tpos",
+}
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 TUNNEL_PORTS = {
@@ -48,6 +59,7 @@ def evaluate_tunnel_health(
     recent_log: str,
     poll_age_seconds: float | None,
     mcp_running: bool,
+    probe_ok: bool | None = None,
 ) -> dict:
     """Classify health across systemd, local HTTP, MCP, and control plane."""
     lowered = recent_log.lower()
@@ -63,6 +75,8 @@ def evaluate_tunnel_health(
         return {"ok": False, "reason": "local_port_closed"}
     if not mcp_running:
         return {"ok": False, "reason": "mcp_process_missing"}
+    if probe_ok is False:
+        return {"ok": False, "reason": "mcp_functional_probe_failed"}
     if poll_age_seconds is None or poll_age_seconds > MAX_POLL_AGE_SECONDS:
         return {"ok": False, "reason": "control_plane_poll_stale"}
     return {"ok": True, "reason": "ok"}
@@ -74,6 +88,7 @@ class Watchdog:
         self._running = True
         self._restart_times: dict[str, list[datetime]] = {}
         self._last_restart: dict[str, datetime] = {}
+        self._probe_cache: dict[str, dict] = {}
         self._status_file = Path.home() / ".serena-v8" / "watchdog-status.json"
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
@@ -131,6 +146,75 @@ class Watchdog:
         except Exception:
             return None
 
+    def functional_probe(self, project: str, timeout: float = 180.0) -> dict:
+        """Exercise initialize, tools/list, and list_dir over real stdio MCP."""
+        command = [
+            "/home/user/.local/bin/serena", "start-mcp-server", "--transport", "stdio",
+            "--project", project, "--tool-timeout", "20", "--log-level", "WARNING",
+            "--context", "desktop-app",
+        ]
+        process = None
+        try:
+            process = subprocess.Popen(
+                command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, bufsize=1,
+                start_new_session=True,
+                env={**os.environ, "SERENA_V8_SKIP_PREWARM": "1"},
+            )
+            next_id = 1
+            def request(method: str, params: dict) -> dict:
+                nonlocal next_id
+                request_id = next_id
+                next_id += 1
+                process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n")
+                process.stdin.flush()
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    ready, _, _ = select.select([process.stdout], [], [], 0.5)
+                    if not ready:
+                        continue
+                    line = process.stdout.readline()
+                    if not line:
+                        break
+                    message = json.loads(line)
+                    if message.get("id") == request_id:
+                        if "error" in message:
+                            raise RuntimeError(str(message["error"]))
+                        return message
+                raise TimeoutError(f"MCP probe timed out waiting for {method}")
+
+            request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "serena-v8-watchdog", "version": "1"}})
+            tools = request("tools/list", {})["result"].get("tools", [])
+            names = {tool.get("name") for tool in tools}
+            if "list_dir" not in names:
+                raise RuntimeError("list_dir missing from tools/list")
+            result = request("tools/call", {"name": "list_dir", "arguments": {"relative_path": ".", "recursive": False}})
+            if "result" not in result:
+                raise RuntimeError("list_dir returned no result")
+            return {"ok": True, "tools": len(tools)}
+        except Exception as exc:
+            log.warning("Functional MCP probe failed for %s: %s", project, exc)
+            return {"ok": False, "error": str(exc)}
+        finally:
+            if process is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=3)
+
+    def maybe_functional_probe(self, service: str) -> dict | None:
+        now = time.monotonic()
+        cached = self._probe_cache.get(service)
+        if cached and now - cached["at"] < FUNCTIONAL_PROBE_INTERVAL_SECONDS:
+            return cached["result"]
+        project = MCP_PROBE_PROJECTS.get(service)
+        if not project:
+            return None
+        result = self.functional_probe(project)
+        self._probe_cache[service] = {"at": now, "result": result}
+        return result
+
     def restart_service(self, service: str) -> bool:
         now = datetime.now()
         if service in self._last_restart and (now - self._last_restart[service]).total_seconds() < RESTART_COOLDOWN:
@@ -158,12 +242,14 @@ class Watchdog:
             mcp_running = self.is_mcp_running(service)
             logs = self.recent_logs(service)
             poll_age = self.poll_age_seconds(port)
+            probe = self.maybe_functional_probe(service) if active and port_open and mcp_running else None
             health = evaluate_tunnel_health(
                 active=active,
                 port_open=port_open,
                 recent_log=logs,
                 poll_age_seconds=poll_age,
                 mcp_running=mcp_running,
+                probe_ok=probe["ok"] if probe is not None else None,
             )
             entry = {
                 "service": service,
@@ -172,6 +258,9 @@ class Watchdog:
                 "port_open": port_open,
                 "mcp_running": mcp_running,
                 "poll_age_seconds": round(poll_age, 1) if poll_age is not None else None,
+                "functional_probe": probe,
+                "state": "AUTH_BLOCKED" if health["reason"] == "control_plane_unauthorized" else ("HEALTHY" if health["ok"] else "UNHEALTHY"),
+                "restart_suppressed": health["reason"] == "control_plane_unauthorized",
                 **health,
             }
             status["tunnels"][service] = entry

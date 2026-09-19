@@ -3,6 +3,7 @@ The Serena Model Context Protocol (MCP) Server
 """
 
 import sys
+import os
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -371,6 +372,13 @@ class SerenaMCPFactory:
                 config.language_backend = language_backend
 
             self.agent = self._create_serena_agent(config, modes=mode_selection_def, project_activation_error=project_activation_error)
+            # Prewarm the project's existing LanguageServerManager before MCP
+            # readiness. Serena's manager owns process reuse and restart logic;
+            # V8 must not create a second competing LSP supervisor.
+            agent_project = self.agent.get_active_project()
+            if agent_project is not None and agent_project.language_server_manager is None and os.environ.get("SERENA_V8_SKIP_PREWARM") != "1":
+                log.info("V8 prewarming language-server manager before MCP readiness")
+                agent_project.create_language_server_manager()
 
         except Exception as e:
             show_fatal_exception_safe(e)

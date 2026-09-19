@@ -66,7 +66,7 @@ class V8RuntimeIntegrationTests(unittest.TestCase):
 
     def test_edit_saves_then_invalidates_cache_and_syncs_lsp(self):
         from serena.code_editor import CodeEditor
-        from serena.symbol import _v8_symbol_cache
+        from serena.symbol import _v8_symbol_cache, make_v8_cache_key
 
         class Config:
             encoding = "utf-8"
@@ -119,7 +119,8 @@ class V8RuntimeIntegrationTests(unittest.TestCase):
             file_path.write_text("old")
             project = Project(tmp)
             editor = Editor(project)
-            _v8_symbol_cache.put("find:/repo:sample.ts", ["stale"])
+            cache_key = make_v8_cache_key("find", tmp, "sample.ts")
+            _v8_symbol_cache.put(cache_key, ["stale"])
             with editor.edited_file_context("sample.ts") as edited:
                 edited.set_contents("new")
 
@@ -128,7 +129,7 @@ class V8RuntimeIntegrationTests(unittest.TestCase):
             self.assertEqual(_v8_symbol_cache.stats()["entries"], 0)
 
     def test_create_text_file_invalidates_cache_and_syncs_lsp(self):
-        from serena.symbol import _v8_symbol_cache
+        from serena.symbol import _v8_symbol_cache, make_v8_cache_key
         from serena.tools.file_tools import CreateTextFileTool
 
         class Config:
@@ -163,7 +164,8 @@ class V8RuntimeIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project = Project(tmp)
             tool = CreateTextFileTool(Agent(project))
-            _v8_symbol_cache.put("find:/repo:any", ["stale"])
+            cache_key = make_v8_cache_key("find", tmp, "any")
+            _v8_symbol_cache.put(cache_key, ["stale"])
 
             result = tool.apply("new.ts", "export const value = 1")
 

@@ -56,6 +56,19 @@ V8 is **not** a wrapper. It is an **overlay** that installs directly into the se
 | 10 | Integration Test — 9/9 PASS |
 | 8.5 | Correctness Fixes — LSP sync + cache invalidation + safety guard |
 
+### Live production wiring
+
+The drop-in production path is the normal `serena start-mcp-server --transport stdio` command. The live MCP request path now includes:
+
+- workspace-isolated asynchronous telemetry and bounded metrics snapshots;
+- per-workspace selective semantic-cache invalidation after edits, followed by Serena's authoritative LSP filesystem synchronization;
+- a bounded lane scheduler with single-flight reads, write serialization, queue backpressure, and request deadlines;
+- LSP prewarm before MCP readiness, while reusing Serena's native `LanguageServerManager` rather than starting a competing supervisor;
+- watchdog probes that exercise `initialize`, `tools/list`, and `list_dir` over real stdio MCP;
+- an `AUTH_BLOCKED` state for tunnel authorization failures, with restart suppression because restarts cannot grant permission.
+
+The standalone V8 daemon/index/cache modules remain diagnostic/experimental components and are not silently presented as part of the live MCP path. This preserves drop-in compatibility and avoids replacing Serena's authoritative LSP and project lifecycle.
+
 ## 🚀 Installation
 
 ### Quick Install (Overlay on serena-agent)
