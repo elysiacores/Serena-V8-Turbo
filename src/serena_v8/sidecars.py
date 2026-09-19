@@ -221,14 +221,58 @@ class WorkspaceCgcIndexer:
         self.runner = runner
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="serena-v8-cgc")
         self._jobs: dict[str, Future[SidecarResult]] = {}
+        self._indexed_snapshots: dict[str, dict[str, tuple[int, int]]] = {}
+        self._job_paths: dict[str, str] = {}
         self._lock = threading.RLock()
 
     def submit(self, *, path: str = ".", force: bool = False) -> str:
         self.runner._safe_path(path)
         job_id = uuid.uuid4().hex
         with self._lock:
-            self._jobs[job_id] = self._executor.submit(self.runner.cgc_index, force, path)
+            self._job_paths[job_id] = str(self.runner._safe_path(path))
+            future = self._executor.submit(self.runner.cgc_index, force, path)
+            self._jobs[job_id] = future
+            future.add_done_callback(lambda done: self._record_snapshot(job_id, done))
         return job_id
+
+    def _record_snapshot(self, job_id: str, future: Future[SidecarResult]) -> None:
+        try:
+            result = future.result()
+        except Exception:
+            return
+        if result.status == SidecarStatus.OK:
+            with self._lock:
+                target = self._job_paths[job_id]
+                self._indexed_snapshots[target] = self._snapshot(target)
+
+    def _snapshot(self, target: str) -> dict[str, tuple[int, int]]:
+        root = Path(self.runner.config.workspace_root)
+        path = Path(target)
+        files: list[Path] = []
+        if path.is_file():
+            files = [path]
+        elif path.is_dir():
+            for current, dirs, names in os.walk(path, followlinks=False):
+                dirs[:] = [d for d in dirs if d not in {".git", "node_modules", ".next", ".next-build", "dist", "build"}]
+                files.extend(Path(current) / name for name in names)
+        snapshot: dict[str, tuple[int, int]] = {}
+        for file_path in files:
+            try:
+                stat = file_path.stat()
+            except OSError:
+                continue
+            snapshot[str(file_path.relative_to(root))] = (stat.st_mtime_ns, stat.st_size)
+        return snapshot
+
+    def stale_paths(self) -> list[str]:
+        with self._lock:
+            snapshots = list(self._indexed_snapshots.items())
+        stale: set[str] = set()
+        for target, previous in snapshots:
+            current = self._snapshot(target)
+            stale.update(set(previous) ^ set(current))
+            stale.update(path for path in set(previous) & set(current) if previous[path] != current[path])
+        return sorted(stale)
 
     def status(self, job_id: str) -> dict[str, object]:
         with self._lock:

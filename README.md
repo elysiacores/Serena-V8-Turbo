@@ -277,13 +277,16 @@ export SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES="5242880"
 ```
 
 The optional tools are `ast_grep_search`, `ast_grep_rewrite`, `cgc_index`,
-`cgc_index_status`, `cgc_callers`, `cgc_callees`, and `cgc_query`. `cgc_index`
-queues a bounded, per-Workspace background job and returns a job ID immediately;
-poll it with `cgc_index_status` before querying relationships. Indexing is scoped
-to the requested Workspace-relative path, so large repositories can be indexed
-incrementally without blocking MCP readiness. `ast_grep_rewrite` is preview-only
-unless `approved=true` is explicitly provided; approved single-file rewrites
-invalidate V8 caches and notify the native LSP.
+`cgc_index_status`, `cgc_stale_paths`, `cgc_callers`, `cgc_callees`, and
+`cgc_query`. `cgc_index` queues a bounded, per-Workspace background job and
+returns a job ID immediately; poll it with `cgc_index_status` before querying
+relationships. `cgc_stale_paths` reports files changed since the last successful
+index so callers can submit only those paths for incremental indexing. Indexing
+is scoped to the requested Workspace-relative path and skips dependency/build
+folders. `ast_grep_rewrite` is preview-only unless `approved=true` is explicitly
+provided; approved single-file rewrites invalidate V8 caches, notify the native
+LSP, request diagnostics, and roll back the file if synchronization or
+diagnostics fails.
 
 ## 📊 Monitoring
 

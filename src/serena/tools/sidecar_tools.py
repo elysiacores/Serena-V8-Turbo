@@ -36,15 +36,38 @@ class AstGrepRewriteTool(Tool, ToolMarkerOptional):
         target.relative_to(root)
         if approved and not target.is_file():
             raise ValueError("approved ast-grep rewrites require a single file path")
+        original = target.read_bytes() if approved else None
         result = runner_for_workspace(str(root)).ast_grep_rewrite(pattern, rewrite, language, str(target), approved)
         payload = result.to_dict()
         payload["approved"] = approved
         if approved and result.status.value == "ok":
             relative = str(target.relative_to(root))
             from serena_v8.lsp_sync import get_cache_invalidator, get_lsp_sync
-            get_cache_invalidator().invalidate_file(relative, str(root))
-            payload["lsp_sync"] = get_lsp_sync().notify_changed(relative, str(root))
+            invalidator = get_cache_invalidator()
+            sync = get_lsp_sync()
+            assert original is not None
+            invalidator.invalidate_file(relative, str(root))
+            lsp_ok = sync.notify_changed(relative, str(root))
+            payload["lsp_sync"] = lsp_ok
             payload["cache_invalidated"] = True
+            if not lsp_ok:
+                target.write_bytes(original)
+                invalidator.invalidate_file(relative, str(root))
+                payload["status"] = "rolled_back"
+                payload["rolled_back"] = True
+                payload["error"] = "LSP synchronization failed"
+                return _json(payload)
+            try:
+                diagnostics_tool = self.agent.get_tool_by_name("get_diagnostics_for_file")
+                payload["diagnostics"] = diagnostics_tool.apply(relative_path=relative)
+                payload["diagnostics_checked"] = True
+            except Exception as exc:
+                target.write_bytes(original)
+                invalidator.invalidate_file(relative, str(root))
+                payload["status"] = "rolled_back"
+                payload["rolled_back"] = True
+                payload["diagnostics_checked"] = False
+                payload["error"] = f"diagnostics failed: {exc}"
         else:
             payload["cache_invalidated"] = False
         return _json(payload)
@@ -66,7 +89,20 @@ class CgcIndexStatusTool(Tool, ToolMarkerOptional):
         """Return queued, running, completed, or failed state for this Workspace job."""
         return _json(indexer_for_workspace(self.project.project_root).status(job_id))
 
+class CgcStalePathsTool(Tool, ToolMarkerOptional):
+    """Report files changed since the last successful CGC index job."""
+
+    def apply(self) -> str:
+        """Return stale Workspace-relative paths requiring incremental indexing."""
+        indexer = indexer_for_workspace(self.project.project_root)
+        return _json({
+            "workspace_root": indexer.runner.config.workspace_root,
+            "stale_paths": indexer.stale_paths(),
+        })
+
+
 class CgcCallersTool(Tool, ToolMarkerOptional, ToolMarkerSymbolicRead):
+    """Find callers of a function using the CGC graph sidecar."""
 
     def apply(self, function: str, path: str | None = None) -> str:
         """Return CGC callers; this is separate from Serena/LSP references."""

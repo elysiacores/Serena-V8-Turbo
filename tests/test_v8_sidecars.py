@@ -116,6 +116,20 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(indexer.status(job_id)["job_id"], job_id)
             indexer.shutdown()
 
+    def test_index_reports_stale_after_workspace_file_changes(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "sample.py"
+            path.write_text("def value():\n    return 1\n")
+            config = SidecarConfig.from_environment(root, environ={})
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "indexed", ""))
+            indexer = WorkspaceCgcIndexer(runner)
+            job_id = indexer.submit(path="sample.py")
+            self.assertEqual(indexer.wait(job_id, timeout=2)["state"], "completed")
+            self.assertEqual(indexer.stale_paths(), [])
+            path.write_text("def value():\n    return 2\n")
+            self.assertEqual(indexer.stale_paths(), ["sample.py"])
+            indexer.shutdown()
+
         with tempfile.TemporaryDirectory() as root:
             runner = SidecarRunner(SidecarConfig.from_environment(root, environ={}), executor=lambda *a, **k: (0, "{}", ""))
             payload = runner.ast_grep_search("$X", "python", ".").to_dict()
