@@ -270,7 +270,10 @@ export SERENA_V8_AST_GREP_BIN="ast-grep"
 export SERENA_V8_CGC_BIN="cgc"
 export SERENA_V8_CGC_DATABASE="kuzudb"
 export SERENA_V8_CGC_DB_ROOT="$HOME/.serena-v8/cgc"
-export SERENA_V8_SIDECAR_TIMEOUT_MS="30000"
+export SERENA_V8_SIDECAR_TIMEOUT_MS="5000"             # ast-grep and fallback default
+export SERENA_V8_CGC_QUERY_TIMEOUT_MS="5000"           # callers, callees, query
+export SERENA_V8_CGC_INCREMENTAL_INDEX_TIMEOUT_MS="10000" # file/scoped index
+export SERENA_V8_CGC_FULL_INDEX_TIMEOUT_MS="120000"    # background full workspace index
 export SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES="5242880"
 # Optional custom CGC query command; {workspace_root} is replaced safely:
 # export SERENA_V8_CGC_COMMAND="cgc --database kuzudb --path {workspace_root} query"

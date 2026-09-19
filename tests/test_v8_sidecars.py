@@ -78,7 +78,22 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(result.status, SidecarStatus.TIMEOUT)
             self.assertEqual(result.timeout_ms, 250)
 
-    def test_cgc_commands_are_workspace_scoped(self):
+    def test_cgc_operation_timeouts_are_separate_and_configurable(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = SidecarConfig.from_environment(root, environ={
+                "SERENA_V8_CGC_QUERY_TIMEOUT_MS": "7000",
+                "SERENA_V8_CGC_INCREMENTAL_INDEX_TIMEOUT_MS": "11000",
+                "SERENA_V8_CGC_FULL_INDEX_TIMEOUT_MS": "90000",
+            })
+            calls = []
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (calls.append(kwargs) or (0, "", "")))
+            runner.cgc_callers("leaf")
+            self.assertEqual(calls[-1]["timeout"], 7)
+            runner.cgc_index(path="sample.py")
+            self.assertEqual(calls[-1]["timeout"], 11)
+            runner.cgc_index(path=".")
+            self.assertEqual(calls[-1]["timeout"], 90)
+
         with tempfile.TemporaryDirectory() as root:
             config = SidecarConfig.from_environment(root, environ={"SERENA_V8_CGC_BIN": "cgc-test"})
             runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "graph\n", ""))
@@ -103,7 +118,23 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(result.status, SidecarStatus.OK)
             self.assertIn(str(Path(root).resolve()), runner.last_command)
 
-    def test_background_index_has_workspace_scoped_job_status(self):
+    def test_cgc_metrics_are_extracted_from_index_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = SidecarConfig.from_environment(root, environ={})
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "Total scanned files | 4\nFunction nodes | 9\nCALLS edges | 12\n", ""))
+            result = runner.cgc_index(path="sample.py")
+            self.assertEqual(result.metrics["scanned_files"], 4)
+            self.assertEqual(result.metrics["function_nodes"], 9)
+            self.assertEqual(result.metrics["calls_edges"], 12)
+
+    def test_subprocess_timeout_kills_sidecar(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = SidecarConfig.from_environment(root, environ={"SERENA_V8_SIDECAR_TIMEOUT_MS": "100"})
+            runner = SidecarRunner(config)
+            result = runner._run(SidecarKind.CGC, ("python", "-c", "import time; time.sleep(2)"))
+            self.assertEqual(result.status, SidecarStatus.TIMEOUT)
+            self.assertEqual(result.timeout_ms, 100)
+
         with tempfile.TemporaryDirectory() as root:
             config = SidecarConfig.from_environment(root, environ={})
             runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "indexed", ""))

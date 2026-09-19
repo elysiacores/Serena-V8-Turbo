@@ -10,12 +10,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
+import signal
 import subprocess
 import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -42,6 +45,9 @@ class SidecarConfig:
     cgc_db_path: str = ""
     cgc_command: tuple[str, ...] = ()
     timeout_ms: int = 5000
+    cgc_query_timeout_ms: int = 5000
+    cgc_incremental_index_timeout_ms: int = 10000
+    cgc_full_index_timeout_ms: int = 120000
     max_output_bytes: int = 5 * 1024 * 1024
 
     @classmethod
@@ -52,12 +58,23 @@ class SidecarConfig:
         root = Path(workspace_root).expanduser().resolve(strict=True)
         if not root.is_dir():
             raise ValueError(f"Workspace root is not a directory: {root}")
+        def timeout_value(name: str, short_name: str, default: int, maximum: int = 600_000) -> int:
+            raw = env.get(name, env.get(short_name, str(default)))
+            try:
+                return max(100, min(int(raw), maximum))
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an integer") from exc
+
+        timeout_ms = timeout_value("SERENA_V8_SIDECAR_TIMEOUT_MS", "SIDECAR_TIMEOUT_MS", 5000, 30_000)
+        query_timeout_ms = timeout_value("SERENA_V8_CGC_QUERY_TIMEOUT_MS", "CGC_QUERY_TIMEOUT_MS", 5000)
+        incremental_timeout_ms = timeout_value(
+            "SERENA_V8_CGC_INCREMENTAL_INDEX_TIMEOUT_MS", "CGC_INCREMENTAL_INDEX_TIMEOUT_MS", 10_000
+        )
+        full_timeout_ms = timeout_value("SERENA_V8_CGC_FULL_INDEX_TIMEOUT_MS", "CGC_FULL_INDEX_TIMEOUT_MS", 120_000)
         try:
-            timeout_ms = int(env.get("SERENA_V8_SIDECAR_TIMEOUT_MS", "5000"))
             max_output = int(env.get("SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES", str(5 * 1024 * 1024)))
         except ValueError as exc:
-            raise ValueError("sidecar numeric settings must be integers") from exc
-        timeout_ms = max(100, min(timeout_ms, 30_000))
+            raise ValueError("SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES must be an integer") from exc
         max_output = max(1024, min(max_output, 50 * 1024 * 1024))
         db_root = Path(env.get("SERENA_V8_CGC_DB_ROOT", str(Path.home() / ".serena-v8" / "cgc"))).expanduser()
         workspace_id = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:24]
@@ -70,6 +87,9 @@ class SidecarConfig:
             cgc_db_path=str((db_root / workspace_id).resolve()),
             cgc_command=tuple(shlex.split(command)) if command else (),
             timeout_ms=timeout_ms,
+            cgc_query_timeout_ms=query_timeout_ms,
+            cgc_incremental_index_timeout_ms=incremental_timeout_ms,
+            cgc_full_index_timeout_ms=full_timeout_ms,
             max_output_bytes=max_output,
         )
 
@@ -84,6 +104,7 @@ class SidecarResult:
     error: str = ""
     duration_ms: float = 0.0
     timeout_ms: int = 0
+    metrics: dict[str, int | float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -95,6 +116,7 @@ class SidecarResult:
             "error": self.error,
             "duration_ms": round(self.duration_ms, 3),
             "timeout_ms": self.timeout_ms,
+            "metrics": self.metrics,
         }
 
 
@@ -141,7 +163,8 @@ class SidecarRunner:
         command = self._cgc_prefix() + ("index", str(target), "--no-progress")
         if force:
             command += ("--force",)
-        return self._run(SidecarKind.CGC, command)
+        timeout_ms = self.config.cgc_full_index_timeout_ms if target == Path(self.config.workspace_root) else self.config.cgc_incremental_index_timeout_ms
+        return self._run(SidecarKind.CGC, command, timeout_ms=timeout_ms)
 
     def cgc_callers(self, function: str, path: str | None = None) -> SidecarResult:
         return self._cgc_relationship("callers", function, path)
@@ -156,7 +179,7 @@ class SidecarRunner:
             command = tuple(part.replace("{workspace_root}", self.config.workspace_root) for part in self.config.cgc_command) + (query,)
         else:
             command = self._cgc_prefix() + ("query", query)
-        return self._run(SidecarKind.CGC, command)
+        return self._run(SidecarKind.CGC, command, timeout_ms=self.config.cgc_query_timeout_ms)
 
     def _cgc_relationship(self, operation: str, function: str, path: str | None) -> SidecarResult:
         if not function.strip():
@@ -164,7 +187,7 @@ class SidecarRunner:
         command = self._cgc_prefix() + ("analyze", operation, function)
         if path:
             command += ("--file", str(self._safe_path(path)))
-        return self._run(SidecarKind.CGC, command)
+        return self._run(SidecarKind.CGC, command, timeout_ms=self.config.cgc_query_timeout_ms)
 
     def _cgc_prefix(self) -> tuple[str, ...]:
         return (self.config.cgc_bin, "--database", self.config.cgc_database, "--path", self.config.cgc_db_path)
@@ -181,9 +204,10 @@ class SidecarRunner:
             raise ValueError("sidecar path must remain inside the active Workspace") from exc
         return resolved
 
-    def _run(self, kind: SidecarKind, command: tuple[str, ...]) -> SidecarResult:
+    def _run(self, kind: SidecarKind, command: tuple[str, ...], timeout_ms: int | None = None) -> SidecarResult:
         import time
 
+        deadline_ms = timeout_ms or self.config.timeout_ms
         self.last_command = command
         self.last_cwd = self.config.workspace_root
         started = time.monotonic()
@@ -191,7 +215,7 @@ class SidecarRunner:
             returncode, stdout, stderr = self._executor(
                 command,
                 cwd=self.config.workspace_root,
-                timeout=self.config.timeout_ms / 1000,
+                timeout=deadline_ms / 1000,
                 max_output_bytes=self.config.max_output_bytes,
             )
         except FileNotFoundError:
@@ -203,15 +227,47 @@ class SidecarRunner:
         else:
             status = SidecarStatus.OK if returncode == 0 else SidecarStatus.FAILED
             error = "" if returncode == 0 else f"sidecar exited with code {returncode}"
-        return SidecarResult(kind, status, self.config.workspace_root, stdout[:self.config.max_output_bytes], stderr[:self.config.max_output_bytes], error, (time.monotonic() - started) * 1000, self.config.timeout_ms)
+        metrics = self._parse_cgc_metrics(stdout) if kind == SidecarKind.CGC else {}
+        return SidecarResult(
+            kind, status, self.config.workspace_root, stdout[:self.config.max_output_bytes],
+            stderr[:self.config.max_output_bytes], error, (time.monotonic() - started) * 1000,
+            deadline_ms, metrics,
+        )
+
+    @staticmethod
+    def _parse_cgc_metrics(stdout: str) -> dict[str, int | float]:
+        patterns = {
+            "scanned_files": r"Total scanned files\s*[|:]\s*([0-9,]+)",
+            "function_nodes": r"Function nodes\s*[|:]\s*([0-9,]+)",
+            "class_nodes": r"Class nodes\s*[|:]\s*([0-9,]+)",
+            "calls_edges": r"CALLS edges\s*[|:]\s*([0-9,]+)",
+            "serialization_seconds": r"Serialization seconds\s*[|:]\s*([0-9.]+)",
+        }
+        metrics: dict[str, int | float] = {}
+        for key, pattern in patterns.items():
+            match = re.search(pattern, stdout, re.IGNORECASE)
+            if match:
+                value = match.group(1).replace(",", "")
+                metrics[key] = float(value) if "." in value else int(value)
+        return metrics
 
     @staticmethod
     def _execute(command: Sequence[str], *, cwd: str, timeout: float, max_output_bytes: int) -> tuple[int, str, str]:
+        process = subprocess.Popen(
+            list(command), cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(list(command), cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False)
+            stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
             raise TimeoutError(f"sidecar exceeded {timeout * 1000:.0f} ms deadline") from exc
-        return completed.returncode, completed.stdout[:max_output_bytes], completed.stderr[:max_output_bytes]
+        return process.returncode, stdout[:max_output_bytes], stderr[:max_output_bytes]
 
 
 class WorkspaceCgcIndexer:
@@ -223,6 +279,7 @@ class WorkspaceCgcIndexer:
         self._jobs: dict[str, Future[SidecarResult]] = {}
         self._indexed_snapshots: dict[str, dict[str, tuple[int, int]]] = {}
         self._job_paths: dict[str, str] = {}
+        self._job_meta: dict[str, dict[str, object]] = {}
         self._lock = threading.RLock()
 
     def submit(self, *, path: str = ".", force: bool = False) -> str:
@@ -230,10 +287,20 @@ class WorkspaceCgcIndexer:
         job_id = uuid.uuid4().hex
         with self._lock:
             self._job_paths[job_id] = str(self.runner._safe_path(path))
-            future = self._executor.submit(self.runner.cgc_index, force, path)
+            self._job_meta[job_id] = {"submitted_at": datetime.now(timezone.utc).isoformat()}
+            future = self._executor.submit(self._run_job, job_id, force, path)
             self._jobs[job_id] = future
             future.add_done_callback(lambda done: self._record_snapshot(job_id, done))
         return job_id
+
+    def _run_job(self, job_id: str, force: bool, path: str) -> SidecarResult:
+        with self._lock:
+            self._job_meta[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+        result = self.runner.cgc_index(force, path)
+        with self._lock:
+            self._job_meta[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            self._job_meta[job_id]["duration_ms"] = round(result.duration_ms, 3)
+        return result
 
     def _record_snapshot(self, job_id: str, future: Future[SidecarResult]) -> None:
         try:
@@ -277,16 +344,18 @@ class WorkspaceCgcIndexer:
     def status(self, job_id: str) -> dict[str, object]:
         with self._lock:
             future = self._jobs.get(job_id)
+            metadata = dict(self._job_meta.get(job_id, {}))
         if future is None:
             raise KeyError(f"unknown CGC index job: {job_id}")
         if not future.done():
             state = "running" if future.running() else "queued"
-            return {"job_id": job_id, "state": state, "workspace_root": self.runner.config.workspace_root}
+            return {"job_id": job_id, "state": state, "workspace_root": self.runner.config.workspace_root, **metadata}
         result = future.result()
         return {
             "job_id": job_id,
             "state": "completed" if result.status == SidecarStatus.OK else "failed",
             "workspace_root": self.runner.config.workspace_root,
+            **metadata,
             "result": result.to_dict(),
         }
 
