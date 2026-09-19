@@ -1,4 +1,6 @@
-# Serena V8
+# Serena-V8 (Turbo)
+
+> **The race-ready engine for semantic coding agents — tuned for speed, stability, and the long run.**
 
 High-performance, drop-in replacement for [Serena](https://github.com/oraios/serena) — the semantic coding agent runtime.
 
