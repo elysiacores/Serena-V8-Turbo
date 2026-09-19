@@ -1,9 +1,47 @@
 import json
+import os
 
 from serena.config.serena_config import LanguageBackend
 from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClientManager
 from serena.project_server import ProjectServerClient
 from serena.tools import Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional
+
+
+def _resolve_registered_project(agent, project_root_or_name):
+    """Resolve a query target without guessing among duplicate project names."""
+    try:
+        return agent.serena_config.get_registered_project(project_root_or_name)
+    except ValueError:
+        active_project = agent.get_active_project()
+        if active_project is None or active_project.project_name != project_root_or_name:
+            raise
+        active_root = os.path.realpath(os.path.abspath(active_project.project_root))
+        for registered_project in agent.serena_config.projects:
+            registered_root = os.path.realpath(os.path.abspath(registered_project.project_root))
+            if registered_project.project_name == project_root_or_name and registered_root == active_root:
+                return registered_project
+        raise
+
+
+def _deduplicate_queryable_projects(agent, projects):
+    """Prefer the active root when duplicate names must be represented as a map."""
+    active_project = agent.get_active_project()
+    active_root = None
+    if active_project is not None:
+        active_root = os.path.realpath(os.path.abspath(active_project.project_root))
+
+    result = {}
+    for project in projects:
+        name = project.project_name
+        root = str(project.project_root)
+        if name not in result:
+            result[name] = root
+        elif active_project is not None and name == active_project.project_name:
+            current_root = os.path.realpath(os.path.abspath(result[name]))
+            project_root = os.path.realpath(os.path.abspath(root))
+            if project_root == active_root and current_root != active_root:
+                result[name] = root
+    return result
 
 
 class ListQueryableProjectsTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveProject):
@@ -33,7 +71,7 @@ class ListQueryableProjectsTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequi
             relevant_projects = registered_projects
 
         # return project names and roots
-        result = {p.project_name: str(p.project_root) for p in relevant_projects}
+        result = _deduplicate_queryable_projects(self.agent, relevant_projects)
         return self._to_json(result)
 
 
@@ -56,9 +94,11 @@ class QueryProjectTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveP
         assert tool.is_readonly(), f"Tool {tool_name} is not read-only and cannot be executed in another project."
         if self._is_project_server_required(tool):
             client = ProjectServerClient()
-            return client.query_project(project_name, tool_name, tool_params_json)
+            registered_project = _resolve_registered_project(self.agent, project_name)
+            query_target = str(registered_project.project_root) if registered_project is not None else project_name
+            return client.query_project(query_target, tool_name, tool_params_json)
         else:
-            registered_project = self.agent.serena_config.get_registered_project(project_name)
+            registered_project = _resolve_registered_project(self.agent, project_name)
             assert registered_project is not None, f"Project {project_name} is not registered and cannot be queried."
             project = registered_project.get_project_instance(self.agent.serena_config)
             with tool.agent.active_project_context(project):

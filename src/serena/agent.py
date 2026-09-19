@@ -1426,7 +1426,7 @@ class SerenaAgent:
         result_str += f" (global default: {self.serena_config.language_backend.value})\n"
         if self._language_backend.is_lsp() and self._active_project:
             result_str += f"Language server status: {self._active_project.get_language_server_manager_status()}\n"
-        result_str += "Available projects:\n" + "\n".join(list(self.serena_config.project_names)) + "\n"
+        result_str += "Available projects:\n" + "\n".join(sorted(set(self.serena_config.project_names))) + "\n"
         result_str += f"Active context: {self._context.name}\n"
 
         # Active modes
