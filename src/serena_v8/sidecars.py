@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -158,9 +159,9 @@ class SidecarRunner:
         command.append(str(target))
         return self._run(SidecarKind.AST_GREP, tuple(command))
 
-    def cgc_index(self, force: bool = False, path: str = ".") -> SidecarResult:
+    def cgc_index(self, force: bool = False, path: str = ".", db_path: str | None = None) -> SidecarResult:
         target = self._safe_path(path)
-        command = self._cgc_prefix() + ("index", str(target), "--no-progress")
+        command = self._cgc_prefix(db_path) + ("index", str(target), "--no-progress")
         if force:
             command += ("--force",)
         timeout_ms = self.config.cgc_full_index_timeout_ms if target == Path(self.config.workspace_root) else self.config.cgc_incremental_index_timeout_ms
@@ -189,8 +190,8 @@ class SidecarRunner:
             command += ("--file", str(self._safe_path(path)))
         return self._run(SidecarKind.CGC, command, timeout_ms=self.config.cgc_query_timeout_ms)
 
-    def _cgc_prefix(self) -> tuple[str, ...]:
-        return (self.config.cgc_bin, "--database", self.config.cgc_database, "--path", self.config.cgc_db_path)
+    def _cgc_prefix(self, db_path: str | None = None) -> tuple[str, ...]:
+        return (self.config.cgc_bin, "--database", self.config.cgc_database, "--path", db_path or self.config.cgc_db_path)
 
     def _safe_path(self, path: str) -> Path:
         candidate = Path(path).expanduser()
@@ -296,11 +297,50 @@ class WorkspaceCgcIndexer:
     def _run_job(self, job_id: str, force: bool, path: str) -> SidecarResult:
         with self._lock:
             self._job_meta[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
-        result = self.runner.cgc_index(force, path)
+        target = self.runner._safe_path(path)
+        staging: Path | None = None
+        try:
+            if target == Path(self.runner.config.workspace_root):
+                staging = self._staging_db_path(job_id)
+                shutil.rmtree(staging, ignore_errors=True)
+                result = self.runner.cgc_index(force, path, db_path=str(staging))
+                if result.status == SidecarStatus.OK:
+                    self._promote_staging(staging)
+                else:
+                    shutil.rmtree(staging, ignore_errors=True)
+            else:
+                result = self.runner.cgc_index(force, path)
+        except Exception as exc:
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
+            result = SidecarResult(
+                SidecarKind.CGC, SidecarStatus.FAILED, self.runner.config.workspace_root,
+                error=f"CGC index promotion failed: {exc}", timeout_ms=self.runner.config.cgc_full_index_timeout_ms,
+            )
         with self._lock:
             self._job_meta[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
             self._job_meta[job_id]["duration_ms"] = round(result.duration_ms, 3)
+            self._job_meta[job_id]["graph_mode"] = "staging_promote" if staging is not None else "in_place"
         return result
+
+    def _staging_db_path(self, job_id: str) -> Path:
+        active = Path(self.runner.config.cgc_db_path)
+        return active.parent / f".{active.name}.staging-{job_id}"
+
+    def _promote_staging(self, staging: Path) -> None:
+        active = Path(self.runner.config.cgc_db_path)
+        active.parent.mkdir(parents=True, exist_ok=True)
+        previous = active.parent / f".{active.name}.previous-{uuid.uuid4().hex}"
+        if active.exists():
+            os.replace(active, previous)
+        try:
+            os.replace(staging, active)
+        except Exception:
+            if previous.exists() and not active.exists():
+                os.replace(previous, active)
+            raise
+        finally:
+            shutil.rmtree(previous, ignore_errors=True)
 
     def _record_snapshot(self, job_id: str, future: Future[SidecarResult]) -> None:
         try:

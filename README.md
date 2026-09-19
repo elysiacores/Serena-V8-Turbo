@@ -284,8 +284,7 @@ The optional tools are `ast_grep_search`, `ast_grep_rewrite`, `cgc_index`,
 `cgc_query`. `cgc_index` queues a bounded, per-Workspace background job and
 returns a job ID immediately; poll it with `cgc_index_status` before querying
 relationships. `cgc_stale_paths` reports files changed since the last successful
-index so callers can submit only those paths for incremental indexing. Indexing
-is scoped to the requested Workspace-relative path and skips dependency/build
+index so callers can submit only those paths for incremental indexing. Full-workspace jobs build in a Workspace-isolated staging KuzuDB and atomically promote it only after success; relationship queries continue reading the previous active graph during the build. Indexing is scoped to the requested Workspace-relative path and skips dependency/build
 folders. `ast_grep_rewrite` is preview-only unless `approved=true` is explicitly
 provided; approved single-file rewrites invalidate V8 caches, notify the native
 LSP, request diagnostics, and roll back the file if synchronization or

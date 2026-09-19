@@ -137,7 +137,10 @@ class SidecarRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             config = SidecarConfig.from_environment(root, environ={})
-            runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "indexed", ""))
+            def index_executor(command, **kwargs):
+                Path(command[4]).mkdir(parents=True, exist_ok=True)
+                return 0, "indexed", ""
+            runner = SidecarRunner(config, executor=index_executor)
             indexer = WorkspaceCgcIndexer(runner)
             job_id = indexer.submit(path=".")
             result = indexer.wait(job_id, timeout=2)
