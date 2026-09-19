@@ -19,7 +19,14 @@ class FileDiscoverySafetyTests(unittest.TestCase):
             result = scan_directory(str(base), recursive=True, relative_to=str(base))
             self.assertEqual(result.files, ["src/keep.ts"])
 
-    def test_find_file_signature_supports_bounded_output(self):
+    def test_list_dir_defaults_to_safe_bounded_discovery(self):
+        import inspect
+        from serena.tools.file_tools import ListDirTool
+
+        signature = inspect.signature(ListDirTool.apply)
+        self.assertTrue(signature.parameters["skip_ignored_files"].default)
+        self.assertEqual(signature.parameters["max_results"].default, 1000)
+
         signature = FindFileTool.apply
         self.assertIn("max_results", signature.__annotations__ or {})
         self.assertIn("max_answer_chars", signature.__annotations__ or {})

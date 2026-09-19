@@ -100,17 +100,16 @@ class ListDirTool(Tool):
     Lists files and directories in the given directory (optionally with recursion).
     """
 
-    def apply(self, relative_path: str, recursive: bool, skip_ignored_files: bool = False, max_answer_chars: int = -1) -> str:
+    def apply(self, relative_path: str, recursive: bool, skip_ignored_files: bool = True, max_answer_chars: int = -1, max_results: int = 1000) -> str:
         """
         Lists files and directories in the given directory (optionally with recursion).
 
         :param relative_path: the relative path to the directory to list; pass "." to scan the project root
         :param recursive: whether to scan subdirectories recursively
         :param skip_ignored_files: whether to skip files and directories that are ignored
-        :param max_answer_chars: if the output is longer than this number of characters,
-            no content will be returned. -1 means the default value from the config will be used.
-            Don't adjust unless there is really no other way to get the content required for the task.
-        :return: a JSON object with the names of directories and files within the given directory
+        :param max_answer_chars: maximum serialized response size; -1 uses configured default
+        :param max_results: maximum total number of directory/file entries returned
+        :return: a JSON object with bounded names of directories and files within the given directory
         """
         # Check if the directory exists before validation
         if not self.project.relative_path_exists(relative_path):
@@ -132,7 +131,20 @@ class ListDirTool(Tool):
             is_ignored_file=is_ignored_path_fn,
         )
 
-        result = self._to_json({"dirs": dirs, "files": files})
+        max_results = max(1, min(max_results, 10000))
+        total_entries = len(dirs) + len(files)
+        if total_entries > max_results:
+            remaining = max_results
+            dirs = dirs[:remaining]
+            remaining -= len(dirs)
+            files = files[:max(0, remaining)]
+        result = self._to_json({
+            "dirs": dirs,
+            "files": files,
+            "returned_count": len(dirs) + len(files),
+            "total_count": total_entries,
+            "truncated": total_entries > len(dirs) + len(files),
+        })
         return self._limit_length(result, max_answer_chars)
 
 
