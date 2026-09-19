@@ -12,6 +12,9 @@ import json
 import os
 import shlex
 import subprocess
+import threading
+import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -192,6 +195,64 @@ class SidecarRunner:
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError(f"sidecar exceeded {timeout * 1000:.0f} ms deadline") from exc
         return completed.returncode, completed.stdout[:max_output_bytes], completed.stderr[:max_output_bytes]
+
+
+class WorkspaceCgcIndexer:
+    """One bounded CGC index worker and job registry per Workspace."""
+
+    def __init__(self, runner: SidecarRunner) -> None:
+        self.runner = runner
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="serena-v8-cgc")
+        self._jobs: dict[str, Future[SidecarResult]] = {}
+        self._lock = threading.RLock()
+
+    def submit(self, *, path: str = ".", force: bool = False) -> str:
+        self.runner._safe_path(path)
+        job_id = uuid.uuid4().hex
+        with self._lock:
+            self._jobs[job_id] = self._executor.submit(self.runner.cgc_index, force, path)
+        return job_id
+
+    def status(self, job_id: str) -> dict[str, object]:
+        with self._lock:
+            future = self._jobs.get(job_id)
+        if future is None:
+            raise KeyError(f"unknown CGC index job: {job_id}")
+        if not future.done():
+            state = "running" if future.running() else "queued"
+            return {"job_id": job_id, "state": state, "workspace_root": self.runner.config.workspace_root}
+        result = future.result()
+        return {
+            "job_id": job_id,
+            "state": "completed" if result.status == SidecarStatus.OK else "failed",
+            "workspace_root": self.runner.config.workspace_root,
+            "result": result.to_dict(),
+        }
+
+    def wait(self, job_id: str, timeout: float | None = None) -> dict[str, object]:
+        with self._lock:
+            future = self._jobs.get(job_id)
+        if future is None:
+            raise KeyError(f"unknown CGC index job: {job_id}")
+        future.result(timeout=timeout)
+        return self.status(job_id)
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+_indexers: dict[str, WorkspaceCgcIndexer] = {}
+_indexers_lock = threading.Lock()
+
+
+def indexer_for_workspace(workspace_root: str) -> WorkspaceCgcIndexer:
+    root = str(Path(workspace_root).expanduser().resolve(strict=True))
+    with _indexers_lock:
+        indexer = _indexers.get(root)
+        if indexer is None:
+            indexer = WorkspaceCgcIndexer(runner_for_workspace(root))
+            _indexers[root] = indexer
+        return indexer
 
 
 def runner_for_workspace(workspace_root: str) -> SidecarRunner:

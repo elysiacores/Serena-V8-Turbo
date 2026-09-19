@@ -10,6 +10,7 @@ from serena_v8.sidecars import (
     SidecarKind,
     SidecarRunner,
     SidecarStatus,
+    WorkspaceCgcIndexer,
 )
 
 
@@ -90,7 +91,19 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(result.status, SidecarStatus.OK)
             self.assertIn(str(Path(root).resolve()), runner.last_command)
 
-    def test_result_is_json_serializable(self):
+    def test_background_index_has_workspace_scoped_job_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = SidecarConfig.from_environment(root, environ={})
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "indexed", ""))
+            indexer = WorkspaceCgcIndexer(runner)
+            job_id = indexer.submit(path=".")
+            result = indexer.wait(job_id, timeout=2)
+            self.assertEqual(result["state"], "completed")
+            self.assertEqual(result["workspace_root"], str(Path(root).resolve()))
+            self.assertEqual(result["result"]["status"], "ok")
+            self.assertEqual(indexer.status(job_id)["job_id"], job_id)
+            indexer.shutdown()
+
         with tempfile.TemporaryDirectory() as root:
             runner = SidecarRunner(SidecarConfig.from_environment(root, environ={}), executor=lambda *a, **k: (0, "{}", ""))
             payload = runner.ast_grep_search("$X", "python", ".").to_dict()
