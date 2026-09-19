@@ -12,19 +12,40 @@ sys.path.insert(0, str(ROOT / "src"))
 
 class V8RuntimeIntegrationTests(unittest.TestCase):
     def test_record_tool_call_updates_stats_file(self):
-        from serena.v8_runtime import get_telemetry, record_tool_call
+        from serena.v8_runtime import flush_stats, get_telemetry, record_tool_call
 
         telemetry = get_telemetry()
         before = telemetry.stats().get("total_requests", telemetry.stats().get("total", 0))
         with tempfile.TemporaryDirectory() as tmp:
             stats_path = Path(tmp) / "stats.json"
             record_tool_call("find_symbol", 12.5, stats_path=stats_path)
+            flush_stats()
             payload = json.loads(stats_path.read_text())
 
         after = telemetry.stats().get("total_requests", telemetry.stats().get("total", 0))
         self.assertEqual(after, before + 1)
         self.assertGreaterEqual(payload["metrics"]["total"], 1)
         self.assertIn("symbol_cache", payload["cache"])
+
+    def test_workspace_stats_paths_are_isolated(self):
+        from serena.v8_runtime import workspace_stats_path
+
+        first = workspace_stats_path("/home/user/SuperProjects/inspi365")
+        second = workspace_stats_path("/home/user/SuperProjects/tpos")
+        self.assertNotEqual(first, second)
+        self.assertIn("stats", str(first))
+        self.assertTrue(first.name.endswith(".json"))
+
+    def test_async_stats_flush_writes_workspace_snapshot(self):
+        from serena.v8_runtime import flush_stats, record_tool_call
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stats_path = Path(tmp) / "workspace.json"
+            record_tool_call("list_dir", 3.0, stats_path=stats_path)
+            flush_stats()
+            payload = json.loads(stats_path.read_text())
+
+        self.assertGreaterEqual(payload["metrics"]["total"], 1)
 
     def test_symbol_cache_can_be_cleared_after_an_edit(self):
         from serena.symbol import _V8QueryCache

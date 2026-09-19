@@ -13,6 +13,8 @@ import threading
 import json
 import hashlib
 import platform
+import queue
+import re
 from pathlib import Path
 from collections import OrderedDict, defaultdict
 from typing import Any, Optional, Dict
@@ -281,6 +283,55 @@ class V8QueryCache:
 # Global query cache
 _v8_query_cache = V8QueryCache()
 
+_stats_queue: queue.Queue[Path] = queue.Queue()
+_stats_worker: threading.Thread | None = None
+_stats_worker_lock = threading.Lock()
+
+
+def workspace_stats_path(project_root: str) -> Path:
+    """Return a process-safe stats file path isolated by project identity."""
+    if not project_root:
+        return Path.home() / ".serena-v8" / "stats.json"
+    canonical = os.path.realpath(os.path.abspath(project_root))
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(canonical).name or "workspace")
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:10]
+    return Path.home() / ".serena-v8" / "stats" / f"{slug}-{digest}.json"
+
+
+def _stats_worker_loop() -> None:
+    while True:
+        first_path = _stats_queue.get()
+        paths = {first_path}
+        item_count = 1
+        while True:
+            try:
+                paths.add(_stats_queue.get_nowait())
+                item_count += 1
+            except queue.Empty:
+                break
+        for path in paths:
+            try:
+                write_v8_stats(path)
+            except Exception:
+                # Metrics must never take down the MCP process.
+                pass
+        for _ in range(item_count):
+            _stats_queue.task_done()
+
+
+def _schedule_stats_write(path: Path) -> None:
+    global _stats_worker
+    with _stats_worker_lock:
+        if _stats_worker is None or not _stats_worker.is_alive():
+            _stats_worker = threading.Thread(target=_stats_worker_loop, name="serena-v8-stats", daemon=True)
+            _stats_worker.start()
+    _stats_queue.put(path)
+
+
+def flush_stats() -> None:
+    """Wait until queued snapshots have been written; intended for tests/shutdown."""
+    _stats_queue.join()
+
 def get_query_cache() -> V8QueryCache:
     return _v8_query_cache
 
@@ -338,4 +389,5 @@ def record_tool_call(
             "timeout": timeout,
         }
     )
-    write_v8_stats(stats_path)
+    path = Path(stats_path) if stats_path is not None else workspace_stats_path(project)
+    _schedule_stats_write(path)

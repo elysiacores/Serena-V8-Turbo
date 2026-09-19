@@ -184,8 +184,8 @@ serena --version
 # Runtime identity
 python -c "import serena; print(serena.get_v8_identity())"
 
-# Cache/metrics stats (written by live MCP tool calls)
-cat ~/.serena-v8/stats.json
+# Cache/metrics stats (one file per Workspace)
+python -c "from pathlib import Path; print(*Path.home().glob('.serena-v8/stats/*.json'), sep='\\n')"
 
 # Watchdog status
 cat ~/.serena-v8/watchdog-status.json
