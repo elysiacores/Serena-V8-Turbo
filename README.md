@@ -275,6 +275,9 @@ export SERENA_V8_CGC_QUERY_TIMEOUT_MS="5000"           # callers, callees, query
 export SERENA_V8_CGC_INCREMENTAL_INDEX_TIMEOUT_MS="10000" # file/scoped index
 export SERENA_V8_CGC_FULL_INDEX_TIMEOUT_MS="120000"    # background full workspace index
 export SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES="5242880"
+# Optional: enable CGC's language-aware SCIP resolver in the runtime environment:
+# cgc config set SCIP_INDEXER true
+# cgc config set SCIP_LANGUAGES go,typescript,javascript
 # Optional custom CGC query command; {workspace_root} is replaced safely:
 # export SERENA_V8_CGC_COMMAND="cgc --database kuzudb --path {workspace_root} query"
 ```
