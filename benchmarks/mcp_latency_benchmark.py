@@ -59,29 +59,33 @@ def process_tree_rss_mb(pid: int) -> float:
 def validate_tool_response(response: dict[str, Any], *, contains: list[str]) -> None:
     """Fail closed: transport success alone is not a correct workload result."""
     if "error" in response or not isinstance(response.get("result"), dict):
-        raise ValueError("JSON-RPC error or missing result")
+        raise ValueError(f"JSON-RPC error or missing result: {response!r}")
     result = response["result"]
-    if result.get("isError"):
-        raise ValueError("MCP tool returned isError")
     content = result.get("content", [])
     if not isinstance(content, list):
-        raise ValueError("Malformed MCP content")
-    texts = [item["text"] for item in content
-             if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)]
+        raise ValueError(f"Malformed MCP content: {content!r}")
+    texts = [
+        item["text"]
+        for item in content
+        if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)
+    ]
     text = "\n".join(texts)
+    if result.get("isError"):
+        detail = text.strip() or json.dumps(result, ensure_ascii=False, default=str)
+        raise ValueError(f"MCP tool returned isError: {detail[:4000]}")
     if not text.strip() or text.strip() in ("[]", "{}", "null", '""'):
         raise ValueError("Empty tool result")
     if re.search(r"(?im)^\s*(?:error\b|[\w.]*exception\b|traceback\b|failed\b)", text):
-        raise ValueError("Tool returned error text")
+        raise ValueError(f"Tool returned error text: {text[:4000]}")
     for part in texts:
         try:
             payload = json.loads(part)
         except ValueError:
             continue
         if isinstance(payload, dict) and (payload.get("error") or payload.get("isError")):
-            raise ValueError("Tool returned an error payload")
+            raise ValueError(f"Tool returned an error payload: {part[:4000]}")
     if not contains or any(not expected or expected not in text for expected in contains):
-        raise ValueError("Tool result did not satisfy expected text assertions")
+        raise ValueError(f"Tool result did not satisfy expected text assertions: {text[:4000]}")
 
 
 class McpProcess:

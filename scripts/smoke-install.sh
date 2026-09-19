@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# A real clean-install smoke must not inherit the developer's Serena config,
+# caches, trust settings, or registered projects from HOME.
+export HOME="$TMP/home"
+mkdir -p "$HOME"
 export UV_TOOL_DIR="$TMP/tools"
 export UV_TOOL_BIN_DIR="$TMP/bin"
 mkdir -p "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"

@@ -460,12 +460,20 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
             config_with_comments["language_servers"] = languages_to_use
 
             project_yml_path = serena_config.get_project_yml_location(str(project_root))
-            if save_to_disk:
+
+            def persist_generated_config() -> None:
                 log.info("Saving project configuration to %s", project_yml_path)
                 with cls._save_lock:
                     save_yaml(project_yml_path, config_with_comments)
                 project_local_yml_path = os.path.join(os.path.dirname(project_yml_path), cls.SERENA_LOCAL_PROJECT_FILE)
                 shutil.copy(PROJECT_LOCAL_TEMPLATE_FILE, project_local_yml_path)
+
+            # Never persist the temporary empty language list used by asynchronous
+            # auto-generation. If this process exits before detection completes,
+            # the next process must regenerate the project rather than load a
+            # permanently incomplete configuration.
+            if save_to_disk and not use_asynchronous_language_determination:
+                persist_generated_config()
 
             project_config = cls._from_dict(config_with_comments, local_override_keys=[])
 
@@ -482,7 +490,10 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                                 str(project_root), interactive=False, serena_config=serena_config
                             )
                             if save_to_disk:
-                                project_config.save(project_yml_path)
+                                config_with_comments["language_servers"] = [
+                                    language.value for language in project_config.language_servers
+                                ]
+                                persist_generated_config()
                     finally:
                         event.set()
 
@@ -1466,4 +1477,10 @@ class SerenaConfig(SharedConfig, ModeSelectionDefinitionWithBaseModes):
                     return int(configured_value)
             except Exception as e:
                 log.error("Error reading language priority for %s: %s. Using default priority.", ls_id.value, e)
+
+        # Serena V8 ships Jedi as its self-contained Python semantic backend.
+        # Prefer it during automatic project creation so a fresh installation
+        # never selects an external Pyright executable that may not exist.
+        if ls_id == LanguageServerId.PYTHON_JEDI:
+            return 3
         return ls_id.get_priority()

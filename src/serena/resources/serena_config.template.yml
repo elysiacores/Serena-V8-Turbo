@@ -109,6 +109,8 @@ ls_specific_settings: {}
 #   * 1 = supersets of other languages, which shall be preferred only if they match more files
 #         (e.g. `vue` and `svelte`, which are supersets of `typescript`)
 #   * 2 = default priority
+# Serena V8 exception: python_jedi defaults to priority 3 because it is bundled with the package,
+# making fresh Python projects self-contained. Set python_jedi explicitly here to override that policy.
 # Example:
 #   ls_priorities:
 #     python: 0
