@@ -43,6 +43,18 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(command[1:4], ("run", "--pattern", "$X"))
             self.assertEqual(runner.last_cwd, str(Path(root).resolve()))
 
+    def test_ast_grep_rewrite_preview_and_apply(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "sample.ts"
+            path.write_text("const value = foo();\n")
+            runner = SidecarRunner(SidecarConfig.from_environment(root, environ={}))
+            preview = runner.ast_grep_rewrite("foo()", "bar()", "typescript", ".", False)
+            self.assertEqual(preview.status, SidecarStatus.OK)
+            self.assertEqual(path.read_text(), "const value = foo();\n")
+            applied = runner.ast_grep_rewrite("foo()", "bar()", "typescript", ".", True)
+            self.assertEqual(applied.status, SidecarStatus.OK)
+            self.assertEqual(path.read_text(), "const value = bar();\n")
+
     def test_path_escape_is_rejected(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
             runner = SidecarRunner(SidecarConfig.from_environment(root, environ={}), executor=lambda *a, **k: (0, "", ""))

@@ -119,6 +119,23 @@ class SidecarRunner:
         command = (self.config.ast_grep_bin, "run", "--pattern", pattern, "--lang", language, str(target))
         return self._run(SidecarKind.AST_GREP, command)
 
+    def ast_grep_rewrite(
+        self, pattern: str, rewrite: str, language: str, path: str = ".", apply: bool = False
+    ) -> SidecarResult:
+        if not pattern.strip() or not language.strip():
+            raise ValueError("pattern and language must not be empty")
+        target = self._safe_path(path)
+        command = [
+            self.config.ast_grep_bin, "run", "--pattern", pattern, "--rewrite", rewrite,
+            "--lang", language,
+        ]
+        if apply:
+            command.append("--update-all")
+        else:
+            command.append("--json=compact")
+        command.append(str(target))
+        return self._run(SidecarKind.AST_GREP, tuple(command))
+
     def cgc_index(self, force: bool = False, path: str = ".") -> SidecarResult:
         target = self._safe_path(path)
         command = self._cgc_prefix() + ("index", str(target), "--no-progress")

@@ -1,6 +1,7 @@
 """Optional read-only MCP tools for Workspace-scoped sidecars."""
 
 import json
+from pathlib import Path
 
 from serena.tools.tools_base import Tool, ToolMarkerOptional, ToolMarkerSymbolicRead
 from serena_v8.sidecars import indexer_for_workspace, result_json, runner_for_workspace
@@ -18,8 +19,38 @@ class AstGrepSearchTool(Tool, ToolMarkerOptional, ToolMarkerSymbolicRead):
         return result_json(runner_for_workspace(self.project.project_root).ast_grep_search(pattern, language, path))
 
 
+class AstGrepRewriteTool(Tool, ToolMarkerOptional):
+    """Preview or explicitly apply an ast-grep rewrite with V8 synchronization."""
+
+    def apply(
+        self,
+        pattern: str,
+        rewrite: str,
+        language: str,
+        path: str,
+        approved: bool = False,
+    ) -> str:
+        """Preview by default; approved file rewrites invalidate cache and notify LSP."""
+        root = Path(self.project.project_root).resolve()
+        target = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+        target.relative_to(root)
+        if approved and not target.is_file():
+            raise ValueError("approved ast-grep rewrites require a single file path")
+        result = runner_for_workspace(str(root)).ast_grep_rewrite(pattern, rewrite, language, str(target), approved)
+        payload = result.to_dict()
+        payload["approved"] = approved
+        if approved and result.status.value == "ok":
+            relative = str(target.relative_to(root))
+            from serena_v8.lsp_sync import get_cache_invalidator, get_lsp_sync
+            get_cache_invalidator().invalidate_file(relative, str(root))
+            payload["lsp_sync"] = get_lsp_sync().notify_changed(relative, str(root))
+            payload["cache_invalidated"] = True
+        else:
+            payload["cache_invalidated"] = False
+        return _json(payload)
+
+
 class CgcIndexTool(Tool, ToolMarkerOptional):
-    """Build or refresh the isolated CGC graph for the active Workspace."""
 
     def apply(self, force: bool = False, path: str = ".") -> str:
         """Queue a Workspace-relative path for isolated background indexing."""
