@@ -40,6 +40,46 @@ Benchmarks separate cold LSP startup from warm tool dispatch because they are di
 
 These are **measured production-overlay benchmarks**, not synthetic figures. They should not be interpreted as the latency of every semantic query, especially `find_symbol`, references, and diagnostics, which depend on LSP state and repository contents.
 
+## 🧩 Monorepo and Multi-Repository Workspace Roots
+
+A Workspace root may contain multiple repositories or independently managed packages. Serena V8 keeps the root as one isolated MCP/Workspace identity while allowing language-server workspace folders to be scoped to the real source projects beneath it.
+
+Recommended configuration:
+
+```yaml
+# .serena/project.yml
+language_servers:
+  - typescript
+  - svelte
+  - go
+
+ls_workspace_folders:
+  - ./frontend-project
+  - ./backend-project
+  - ./contracts-project
+  - ./mobile-project
+
+ignored_paths:
+  - "**/.worktrees/**"
+  - "**/.serena/**"
+  - "**/.data/**"
+  - "**/node_modules/**"
+  - "**/dist/**"
+  - "**/build/**"
+```
+
+Rules for aggregated roots:
+
+- Keep the parent directory as the active Workspace when cross-repository navigation is required.
+- List each real repository or package in `ls_workspace_folders`; do not use a broad root folder when it causes unrelated projects or duplicate checkouts to be scanned.
+- Order language servers from the most specific file handler to the fallback handler. For example, use TypeScript for standalone `.ts/.js` files and Svelte for `.svelte` files.
+- Exclude worktrees, generated output, caches, dependency trees, and runtime data from both Serena discovery and CGC indexing.
+- Keep CGC databases, LSP state, caches, telemetry, and edit state scoped to the canonical aggregated Workspace root.
+- Use `cgc_stale_paths` and incremental indexing after the initial graph build; do not rebuild the entire aggregated root after every file change.
+- Adding a repository under the root must be an explicit workspace-folder/configuration change followed by an MCP restart or refresh; it must not silently broaden an active project.
+
+This pattern supports future repositories without cross-project state leakage while preserving a single agent-visible Workspace context.
+
 
 ## 🛠️ What V8 Fixes (Production Bug Fixes)
 
