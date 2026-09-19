@@ -26,7 +26,7 @@ class _Config:
     def get_registered_project(self, value):
         matches = [p for p in self.projects if p.project_name == value]
         if len(matches) > 1:
-            raise ValueError("Multiple projects found with name 'tp-copydesign'")
+            raise ValueError("Multiple projects found with name 'workspace-a'")
         return matches[0] if matches else None
 
 
@@ -34,7 +34,7 @@ class _Agent:
     def __init__(self, projects, active_root):
         self.serena_config = _Config(projects, active_root)
         self._active_project = type(
-            "ActiveProject", (), {"project_name": "tp-copydesign", "project_root": active_root}
+            "ActiveProject", (), {"project_name": "workspace-a", "project_root": active_root}
         )()
 
     def get_language_backend(self):
@@ -46,8 +46,8 @@ class _Agent:
 
 class ProjectRegistryTests(unittest.TestCase):
     def setUp(self):
-        self.primary = _RegisteredProject("tp-copydesign", "/home/user/SuperProjects/tp-copydesign")
-        self.temp = _RegisteredProject("tp-copydesign", "/tmp/tp-stable-workflow")
+        self.primary = _RegisteredProject("workspace-a", "/tmp/example-workspace-a")
+        self.temp = _RegisteredProject("workspace-a", "/tmp/other-example-workspace-a")
         self.agent = _Agent([self.primary, self.temp], self.primary.project_root)
 
     def test_list_queryable_projects_prefers_active_root_for_duplicate_name(self):
@@ -56,10 +56,10 @@ class ProjectRegistryTests(unittest.TestCase):
 
         result = json.loads(tool.apply())
 
-        self.assertEqual(result["tp-copydesign"], self.primary.project_root)
+        self.assertEqual(result["workspace-a"], self.primary.project_root)
 
     def test_query_project_resolves_duplicate_name_to_active_root(self):
-        resolved = _resolve_registered_project(self.agent, "tp-copydesign")
+        resolved = _resolve_registered_project(self.agent, "workspace-a")
 
         self.assertIs(resolved, self.primary)
 

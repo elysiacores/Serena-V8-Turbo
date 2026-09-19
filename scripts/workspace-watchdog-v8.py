@@ -22,21 +22,25 @@ MAX_POLL_AGE_SECONDS = 90
 FUNCTIONAL_PROBE_INTERVAL_SECONDS = 300
 LOG_DIR = Path.home() / ".serena-v8" / "logs"
 
-MCP_PROBE_PROJECTS = {
-    "inspi365-tunnel.service": "/home/user/SuperProjects/inspi365",
-    "tp-tunnel.service": "/home/user/SuperProjects/tp-copydesign",
-    "tummun-tunnel.service": "/home/user/SuperProjects/tummun/tummun",
-    "makinni-tunnel.service": "/home/user/SuperProjects/makinni/makinni",
-    "tpos-tunnel.service": "/home/user/SuperProjects/tpos",
-}
+def _load_probe_projects() -> dict[str, str]:
+    """Load optional probe targets from user-owned configuration."""
+    raw = os.environ.get("SERENA_V8_PROBE_PROJECTS_JSON", "{}")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+MCP_PROBE_PROJECTS = _load_probe_projects()
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 TUNNEL_PORTS = {
-    "inspi365-tunnel.service": 8787,
-    "tp-tunnel.service": 8788,
-    "tummun-tunnel.service": 8789,
-    "makinni-tunnel.service": 8790,
-    "tpos-tunnel.service": 8791,
+    "workspace-a-tunnel.service": 8787,
+    "workspace-b-tunnel.service": 8788,
+    "workspace-c-tunnel.service": 8789,
+    "workspace-d-tunnel.service": 8790,
+    "workspace-e-tunnel.service": 8791,
 }
 
 log = logging.getLogger("v8-watchdog")
@@ -149,7 +153,7 @@ class Watchdog:
     def functional_probe(self, project: str, timeout: float = 180.0) -> dict:
         """Exercise initialize, tools/list, and list_dir over real stdio MCP."""
         command = [
-            "/home/user/.local/bin/serena", "start-mcp-server", "--transport", "stdio",
+            os.environ.get("SERENA_V8_SERENA_BIN", "serena"), "start-mcp-server", "--transport", "stdio",
             "--project", project, "--tool-timeout", "20", "--log-level", "WARNING",
             "--context", "desktop-app",
         ]

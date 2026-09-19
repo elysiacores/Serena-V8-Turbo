@@ -10,16 +10,16 @@ class SingleProjectInvariantTests(unittest.TestCase):
         agent = object.__new__(SerenaAgent)
 
         class ActiveProject:
-            project_name = "tp-copydesign"
-            project_root = "/home/user/SuperProjects/tp-copydesign"
+            project_name = "workspace-a"
+            project_root = "/tmp/example-workspace-a"
 
             def shutdown(self, timeout=2.0):
                 return None
 
         class Config:
             def get_project(self, value):
-                if value == "tp-copydesign":
-                    raise ValueError("Multiple projects found with name 'tp-copydesign'")
+                if value == "workspace-a":
+                    raise ValueError("Multiple projects found with name 'workspace-a'")
                 return None
 
         agent._active_project = ActiveProject()
@@ -29,7 +29,7 @@ class SingleProjectInvariantTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"SERENA_V8_SINGLE_PROJECT": "1"}):
             with patch.object(agent, "_activate_project", return_value=False) as activate:
-                result = agent.activate_project_from_path_or_name("tp-copydesign")
+                result = agent.activate_project_from_path_or_name("workspace-a")
 
         self.assertFalse(result)
         activate.assert_called_once()
@@ -38,16 +38,16 @@ class SingleProjectInvariantTests(unittest.TestCase):
         agent = object.__new__(SerenaAgent)
 
         class ActiveProject:
-            project_name = "workspace-a"
-            project_root = "/tmp/test-workspace-a"
+            project_name = "workspace-b"
+            project_root = "/tmp/test-workspace-b"
 
             def shutdown(self, timeout=2.0):
                 return None
 
         class Config:
             def get_project(self, value):
-                if value == "tp-copydesign":
-                    raise ValueError("Multiple projects found with name 'tp-copydesign'")
+                if value == "workspace-a":
+                    raise ValueError("Multiple projects found with name 'workspace-a'")
                 return None
 
         agent._active_project = ActiveProject()
@@ -57,7 +57,7 @@ class SingleProjectInvariantTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"SERENA_V8_SINGLE_PROJECT": "1"}):
             with self.assertRaisesRegex(ValueError, "Multiple projects found"):
-                agent.activate_project_from_path_or_name("tp-copydesign")
+                agent.activate_project_from_path_or_name("workspace-a")
 
     def test_project_started_with_folder_rejects_switch_to_another_folder(self):
         agent = object.__new__(SerenaAgent)

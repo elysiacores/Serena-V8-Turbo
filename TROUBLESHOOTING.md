@@ -127,7 +127,7 @@ mcp:
 ps aux | grep 'tunnel-client\|serena' | grep -v grep
 
 # Check tunnel logs
-journalctl --user -u tp-tunnel.service -n 50 --no-pager | grep -i "v8\|version"
+journalctl --user -u workspace-b-tunnel.service -n 50 --no-pager | grep -i "v8\|version"
 ```
 
 ---
@@ -179,8 +179,8 @@ pkill -f 'tunnel-client' 2>/dev/null
 pkill -f 'serena start-mcp' 2>/dev/null
 
 # Restart tunnels
-systemctl --user restart inspi365-tunnel.service
-systemctl --user restart tp-tunnel.service
+systemctl --user restart workspace-a-tunnel.service
+systemctl --user restart workspace-b-tunnel.service
 # ... restart all your tunnel services
 
 # Verify V8 is running
@@ -327,7 +327,7 @@ SERENA_PATH=$(python3 -c "import serena, os; print(os.path.dirname(serena.__file
 cp -r "$SERENA_PATH.backup_$(date +%Y%m%d)/serena"/* "$SERENA_PATH/serena/"
 
 # Step 4: Restart tunnels
-systemctl --user restart tp-tunnel.service inspi365-tunnel.service
+systemctl --user restart workspace-b-tunnel.service workspace-a-tunnel.service
 
 # Step 5: Verify
 python3 -c "import serena; print(serena.__version__)"

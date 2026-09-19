@@ -30,8 +30,8 @@ class V8RuntimeIntegrationTests(unittest.TestCase):
     def test_workspace_stats_paths_are_isolated(self):
         from serena.v8_runtime import workspace_stats_path
 
-        first = workspace_stats_path("/home/user/SuperProjects/inspi365")
-        second = workspace_stats_path("/home/user/SuperProjects/tpos")
+        first = workspace_stats_path("/tmp/example-workspace-a")
+        second = workspace_stats_path("/tmp/example-workspace-b")
         self.assertNotEqual(first, second)
         self.assertIn("stats", str(first))
         self.assertTrue(first.name.endswith(".json"))

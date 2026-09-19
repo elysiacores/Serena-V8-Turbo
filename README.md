@@ -264,6 +264,14 @@ systemctl --user enable --now serena-v8-watchdog.service
 cat ~/.serena-v8/watchdog-status.json
 ```
 
+Probe targets are intentionally not bundled in the repository. Configure them
+for each installation before starting the watchdog, for example:
+
+```bash
+export SERENA_V8_PROBE_PROJECTS_JSON='{"workspace-a-tunnel.service":"/path/to/workspace-a"}'
+export SERENA_V8_SERENA_BIN="serena"
+```
+
 A tunnel with valid local MCP but invalid control-plane permission is reported
 as `AUTH_BLOCKED`, not restarted repeatedly.
 

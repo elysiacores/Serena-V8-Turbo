@@ -50,7 +50,7 @@ def warm_bench(project, tool, args, rounds=3):
 
 
 def main():
-    project = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "SuperProjects/tpos")
+    project = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "example-workspace")
     
     tests = [
         ("search_for_pattern", {"pattern": "export", "relative_path": "frontend/src"}),
