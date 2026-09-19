@@ -11,15 +11,12 @@ This manager:
 5. Enables hibernation (stop + restart on demand)
 """
 
-import os
-import sys
 import time
-import signal
 import subprocess
 import threading
 import logging
 from enum import Enum
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
@@ -378,29 +375,24 @@ class LSPLifecycleManager:
                 self._evict_idle_lsp()
     
     def _memory_pressure(self) -> MemoryPressure:
-        """Calculate current memory pressure."""
-        try:
-            import psutil
-            total_rss = sum(
-                lsp.rss_mb for lsp in self._processes.values()
-                if lsp.state == LSPState.WARM
-            )
-            
-            max_rss = self.config["max_total_rss_mb"]
-            ratio = total_rss / max_rss
-            
-            if ratio > 0.95:
-                return MemoryPressure.CRITICAL
-            elif ratio > 0.8:
-                return MemoryPressure.HIGH
-            elif ratio > 0.6:
-                return MemoryPressure.MEDIUM
-            elif ratio > 0.3:
-                return MemoryPressure.LOW
-            return MemoryPressure.NONE
-            
-        except ImportError:
-            return MemoryPressure.NONE
+        """Calculate current memory pressure from tracked LSP RSS values."""
+        total_rss = sum(
+            lsp.rss_mb for lsp in self._processes.values()
+            if lsp.state == LSPState.WARM
+        )
+
+        max_rss = self.config["max_total_rss_mb"]
+        ratio = total_rss / max_rss
+
+        if ratio > 0.95:
+            return MemoryPressure.CRITICAL
+        if ratio > 0.8:
+            return MemoryPressure.HIGH
+        if ratio > 0.6:
+            return MemoryPressure.MEDIUM
+        if ratio > 0.3:
+            return MemoryPressure.LOW
+        return MemoryPressure.NONE
     
     def _evict_idle_lsp(self):
         """Evict idle LSP processes to reclaim memory."""

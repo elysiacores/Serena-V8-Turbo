@@ -47,7 +47,8 @@ class SemanticFreshnessRegressionTests(unittest.TestCase):
             project = SimpleNamespace(project_root=directory, get_language_server_manager_or_raise=lambda: manager)
             retriever = LanguageServerSymbolRetriever(project)
             location = LanguageServerSymbolLocation('target.py', 0, 4)
-            query = lambda: retriever.find_referencing_symbols_by_location(location)
+            def query():
+                return retriever.find_referencing_symbols_by_location(location)
             self.assertEqual(len(query()), 1)
             stamp = caller.stat()
             caller.write_text('other_()')

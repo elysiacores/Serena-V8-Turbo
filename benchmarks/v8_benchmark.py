@@ -12,13 +12,12 @@ Measures every stage of the request path.
 """
 
 import json
-import os
 import sys
 import time
 import subprocess
 import statistics
 from pathlib import Path
-from typing import Callable, Any
+from typing import Callable
 from dataclasses import dataclass, field
 
 
@@ -48,19 +47,22 @@ class BenchmarkResult:
     
     @property
     def p50_ms(self):
-        if not self.times: return 0
+        if not self.times:
+            return 0
         s = sorted(self.times)
         return round(s[len(s)//2] * 1000, 2)
     
     @property
     def p95_ms(self):
-        if not self.times: return 0
+        if not self.times:
+            return 0
         s = sorted(self.times)
         return round(s[int(len(s)*0.95)] * 1000, 2)
     
     @property
     def p99_ms(self):
-        if not self.times: return 0
+        if not self.times:
+            return 0
         s = sorted(self.times)
         return round(s[int(len(s)*0.99)] * 1000, 2)
     
@@ -155,7 +157,7 @@ def benchmark_direct(project: str):
     sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
     from serena.project import Project
     from serena.config.serena_config import SerenaConfig
-    from serena.symbol import LanguageServerSymbolRetriever, _v8_symbol_cache
+    from serena.symbol import LanguageServerSymbolRetriever
     
     config = SerenaConfig.from_config_file(str(Path.home() / ".serena/serena_config.yml"), generate_if_missing=True)
     project_obj = Project.load(project, config)
@@ -214,8 +216,10 @@ def benchmark_stdio(project: str):
             while True:
                 line = proc.stdout.readline().decode().strip()
                 if line:
-                    try: return json.loads(line)
-                    except: continue
+                    try:
+                        return json.loads(line)
+                    except Exception:
+                        continue
         
         # Initialize
         send("initialize", {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"bench","version":"1.0"}})
@@ -280,8 +284,10 @@ def benchmark_cold_warm(project: str):
             while True:
                 line = proc.stdout.readline().decode().strip()
                 if line:
-                    try: return json.loads(line)
-                    except: continue
+                    try:
+                        return json.loads(line)
+                    except Exception:
+                        continue
         
         send("initialize", {"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"bench","version":"1.0"}})
         recv()

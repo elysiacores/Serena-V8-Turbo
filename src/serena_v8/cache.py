@@ -8,8 +8,6 @@ L3: LSP authoritative source
 Prevents monotonic memory growth.
 """
 
-import os
-import sys
 import json
 import time
 import sqlite3
@@ -158,7 +156,7 @@ class L2DiskCache:
             
             try:
                 return json.loads(value_blob)
-            except:
+            except Exception:
                 return None
     
     def put(self, key: str, value: Any, ttl: int = 3600, project: str = "", tool: str = ""):

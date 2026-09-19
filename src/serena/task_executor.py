@@ -117,7 +117,7 @@ class TaskExecutor:
                 self.future.result(timeout=self.timeout)
             except concurrent.futures.TimeoutError:
                 return False
-            except:
+            except Exception:
                 pass
             return True
 

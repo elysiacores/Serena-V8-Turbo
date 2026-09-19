@@ -17,7 +17,6 @@ import re
 import select
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any

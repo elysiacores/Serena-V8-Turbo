@@ -55,7 +55,7 @@ class MemoryLogHandler(logging.Handler):
                 for callback in self._emit_callbacks:
                     try:
                         callback(msg)
-                    except:
+                    except Exception:
                         pass
                 self._log_queue.task_done()
             except queue.Empty:

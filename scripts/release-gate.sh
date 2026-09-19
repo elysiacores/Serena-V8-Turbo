@@ -29,6 +29,10 @@ if [[ -z "$EXPECTED_VERSION" ]]; then
   EXPECTED_VERSION="$(uv run --extra dev python -c 'from serena_v8._version import VERSION; print(VERSION)')"
 fi
 
+echo "== static quality =="
+uv run --extra dev ruff check src benchmarks tests
+uv run --extra dev python -m compileall -q src benchmarks tests
+
 echo "== regression suite =="
 uv run --extra dev python -m pytest -q
 

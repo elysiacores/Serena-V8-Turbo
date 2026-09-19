@@ -237,21 +237,21 @@ class TextUtils:
         return text_stepper.line_start_idx + col
 
     @staticmethod
-    def _get_updated_position_from_line_and_column_and_edit(l: int, c: int, text_to_be_inserted: str) -> tuple[int, int]:
+    def _get_updated_position_from_line_and_column_and_edit(line: int, col: int, text_to_be_inserted: str) -> tuple[int, int]:
         """
-        :param l: the 0-based line number before the edit
-        :param c: the 0-based column number before the edit
+        :param line: the 0-based line number before the edit
+        :param col: the 0-based column number before the edit
         :param text_to_be_inserted: the text that was inserted at the given position
         :return: the updated 0-based line and column numbers after the edit (end of insertion)
         """
         text_stepper = TextStepper(text_to_be_inserted)
         text_stepper.process_all()
         if text_stepper.line > 0:
-            l += text_stepper.line
-            c = text_stepper.col
+            line += text_stepper.line
+            col = text_stepper.col
         else:
-            c += text_stepper.col
-        return l, c
+            col += text_stepper.col
+        return line, col
 
     @staticmethod
     def delete_text_between_positions(text: str, start_line: int, start_col: int, end_line: int, end_col: int) -> tuple[str, str]:

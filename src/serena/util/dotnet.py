@@ -32,7 +32,7 @@ class DotNETUtil:
                 version_strings = re.findall(r"Microsoft.NETCore.App\s+([^\s]+)", result.stdout)
                 log.info("Installed .NET runtime versions: %s", version_strings)
                 return [Version(v) for v in version_strings]
-            except:
+            except Exception:
                 log.warning("Failed to run 'dotnet --list-runtimes' to check .NET version; assuming no installed .NET versions")
                 return []
         else:

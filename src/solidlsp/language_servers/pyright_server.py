@@ -195,7 +195,7 @@ class PyrightServer(SolidLanguageServer):
             """
             Also listen for experimental/serverStatus as a backup signal
             """
-            if params.get("quiescent") == True:
+            if params.get("quiescent"):
                 log.info("Received experimental/serverStatus with quiescent=true")
                 if not self.found_source_files:
                     self.analysis_complete.set()

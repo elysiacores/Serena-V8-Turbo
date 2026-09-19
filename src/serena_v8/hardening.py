@@ -10,8 +10,8 @@ Fixes:
 6. Backpressure — apply when queue full
 """
 
+import contextlib
 import os
-import sys
 import json
 import time
 import signal
@@ -19,8 +19,8 @@ import threading
 import subprocess
 import logging
 import io
-from typing import Optional, Any, Callable
-from concurrent.futures import Future, TimeoutError
+from typing import Optional, Any
+from concurrent.futures import Future
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -380,8 +380,6 @@ def cleanup_process_tree(pid: int, timeout: float = 5.0):
 # ═══════════════════════════════════════════════════════════════
 # 7. Deadline Context Manager
 # ═══════════════════════════════════════════════════════════════
-
-import contextlib
 
 @contextlib.contextmanager
 def deadline(timeout: float):

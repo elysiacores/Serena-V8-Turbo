@@ -21,14 +21,11 @@ Optimizations:
 """
 
 import os
-import sys
 import json
 import time
 import zlib
-import struct
 import threading
 from typing import Any, Dict, List, Optional, Set
-from io import StringIO
 import logging
 
 log = logging.getLogger(__name__)

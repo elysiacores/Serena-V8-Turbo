@@ -167,7 +167,7 @@ class ReadNews:
             instance._save()
             try:
                 os.unlink(legacy_last_read_id_path)
-            except:
+            except Exception:
                 pass
             return instance
 
@@ -513,7 +513,7 @@ class SerenaDashboardAPI:
         active_project_name = project.project_name if project else None
         project_info = {
             "name": active_project_name,
-            "language": ", ".join([l.value for l in project.project_config.language_servers]) if project else None,
+            "language": ", ".join([language.value for language in project.project_config.language_servers]) if project else None,
             "path": str(project.project_root) if project else None,
         }
 

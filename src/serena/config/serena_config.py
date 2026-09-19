@@ -452,7 +452,7 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                     determined_languages = cls._determine_project_language_servers(
                         str(project_root), interactive=interactive, serena_config=serena_config
                     )
-                    languages_to_use = [l.value for l in determined_languages]
+                    languages_to_use = [language.value for language in determined_languages]
             else:
                 languages_to_use = [lang.value for lang in languages]
             config_with_comments, _ = cls._load_yaml_dict(PROJECT_TEMPLATE_FILE)
@@ -591,7 +591,7 @@ class ProjectConfig(SharedConfig, ModeSelectionDefinitionWithAddedModes):
                 ls_ids.append(ls_id)
             except ValueError as e:
                 raise ValueError(
-                    f"Invalid language server: '{orig_language_str}'.\nValid values are: {[l.value for l in LanguageServerId]}"
+                    f"Invalid language server: '{orig_language_str}'.\nValid values are: {[language.value for language in LanguageServerId]}"
                 ) from e
 
         # Validate activation_command_timeout

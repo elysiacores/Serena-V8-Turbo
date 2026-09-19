@@ -1294,7 +1294,7 @@ class EclipseJDTLS(SolidLanguageServer):
             assert "registrations" in params
             for registration in params["registrations"]:
                 if registration["method"] == "textDocument/completion":
-                    assert registration["registerOptions"]["resolveProvider"] == True
+                    assert registration["registerOptions"]["resolveProvider"]
                     assert registration["registerOptions"]["triggerCharacters"] == [
                         ".",
                         "@",

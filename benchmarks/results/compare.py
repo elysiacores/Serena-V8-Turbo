@@ -1,4 +1,3 @@
-import json
 
 # Benchmark results from actual tests
 data = {

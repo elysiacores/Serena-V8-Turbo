@@ -153,7 +153,7 @@ class BasedPyrightLanguageServer(SolidLanguageServer):
             handle_basedpyright_progress_notification("end", params)
 
         def check_experimental_status(params: dict) -> None:
-            if params.get("quiescent") == True:
+            if params.get("quiescent"):
                 log.info("Received experimental/serverStatus with quiescent=true")
                 if not self.found_source_files:
                     self.analysis_complete.set()

@@ -7,11 +7,11 @@ import json
 import tempfile
 from pathlib import Path
 
-from serena_v8.sidecars import SidecarResult, SidecarKind, SidecarStatus
-
-
-from serena_v8 import lsp_sync
 from serena.tools.file_tools import CreateTextFileTool
+from serena.tools.sidecar_tools import AstGrepRewriteTool
+from serena.tools.tools_base import ToolMarkerCanEdit
+from serena_v8 import lsp_sync
+from serena_v8.sidecars import SidecarKind, SidecarResult, SidecarStatus
 
 
 class NativeRewriteSyncTests(unittest.TestCase):
@@ -25,10 +25,6 @@ class NativeRewriteSyncTests(unittest.TestCase):
         project = SimpleNamespace(get_language_server_manager_or_raise=lambda: manager)
         self.assertTrue(lsp_sync.LSPDocumentSync().notify_changed("sample.py", project))
         manager.sync_file_system_changes.assert_called_once_with()
-
-
-from serena.tools.sidecar_tools import AstGrepRewriteTool
-from serena.tools.tools_base import ToolMarkerCanEdit
 
 
 class RewriteTransactionSafetyTests(unittest.TestCase):

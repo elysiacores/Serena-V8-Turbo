@@ -12,18 +12,11 @@ from serena_v8._version import VERSION
 
 __version__ = VERSION
 
-import os
-import sys
 import time
-import json
 import threading
-import subprocess
-import signal
 from collections import OrderedDict
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Optional
-from concurrent.futures import Future
 
 try:
     import psutil

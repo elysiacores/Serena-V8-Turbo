@@ -259,7 +259,7 @@ class DownloadedDependencyHashDatabase:
             try:
                 with open(self._json_file, encoding="utf-8") as f:
                     self._hashes = json.load(f)
-            except:
+            except Exception:
                 log.warning("Error loading %s", self._json_file, exc_info=True)
 
     @classmethod
@@ -303,14 +303,14 @@ class DownloadedDependencyHashDatabase:
                 sha = FileUtils.calculate_sha256(path)
                 log.info("SHA256 for %s: %s", dep.get_url(), sha)
                 self._hashes[dep.get_url()] = sha
-        except:
+        except Exception:
             log.warning("Error updating hash for %s", dep.get_url(), exc_info=True)
 
     def _save(self) -> None:
         try:
             with open(self._json_file, "w", encoding="utf-8") as f:
                 json.dump(self._hashes, f, indent=2)
-        except:
+        except Exception:
             log.warning("Error saving %s", self._json_file, exc_info=True)
 
 

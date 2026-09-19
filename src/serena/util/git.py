@@ -18,5 +18,5 @@ def get_git_status() -> GitStatus | None:
         return GitStatus(
             commit=commit_hash, has_unstaged_changes=unstaged, has_staged_uncommitted_changes=staged, has_untracked_files=untracked
         )
-    except:
+    except Exception:
         return None

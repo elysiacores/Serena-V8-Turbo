@@ -14,11 +14,8 @@ import sys
 import json
 import time
 import subprocess
-import statistics
-import threading
 from pathlib import Path
-from typing import Dict, List, Any
-from concurrent.futures import Future, TimeoutError
+from concurrent.futures import Future
 
 # ═══ Setup paths ═══
 V8_SRC = Path(__file__).resolve().parents[1] / "src"
@@ -124,7 +121,7 @@ class V8IntegrationTest:
         try:
             value = future.result(timeout=5)
             executed = value == "done"
-        except:
+        except Exception:
             executed = False
         
         stats = scheduler.stats()
@@ -208,7 +205,6 @@ class V8IntegrationTest:
         
         # Check initial state
         go_state = go_lsp.state
-        ts_state = ts_lsp.state
         
         # Memory pressure
         pressure = mgr._memory_pressure()
@@ -281,7 +277,7 @@ class V8IntegrationTest:
         
         from serena_v8.hardening import (
             BoundedLogHandler, ResponseLimiter, RequestWatchdog,
-            BackpressureController, deadline, get_response_limiter
+            BackpressureController
         )
         
         import logging
@@ -334,7 +330,7 @@ class V8IntegrationTest:
         """Test 8: Profiler."""
         print("\n[Test 8] Profiler")
         
-        from serena_v8.profiler import V8Profiler, get_profiler, generate_report
+        from serena_v8.profiler import V8Profiler
         
         profiler = V8Profiler()
         
@@ -422,8 +418,10 @@ class V8IntegrationTest:
         
         def send(method, params):
             msg = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n"
-            if proc.stdin: proc.stdin.write(msg.encode())
-            if proc.stdin: proc.stdin.flush()
+            if proc.stdin:
+                proc.stdin.write(msg.encode())
+            if proc.stdin:
+                proc.stdin.flush()
         
         def recv():
             while True:
@@ -431,7 +429,7 @@ class V8IntegrationTest:
                 if line:
                     try:
                         return json.loads(line)
-                    except:
+                    except Exception:
                         continue
         
         # Initialize

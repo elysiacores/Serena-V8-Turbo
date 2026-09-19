@@ -11,7 +11,6 @@ Protocol: JSON messages over Unix stream socket
 """
 
 import os
-import sys
 import json
 import time
 import signal
@@ -20,12 +19,11 @@ import threading
 import subprocess
 from pathlib import Path
 from typing import Any, Optional, Dict, List
-from collections import OrderedDict, defaultdict
 import logging
 
 # V8 runtime
 from serena.v8_runtime import (
-    v8_status, get_telemetry, get_query_cache, get_memory_info, _v8_start_time
+    get_telemetry, get_query_cache, get_memory_info
 )
 
 log = logging.getLogger(__name__)

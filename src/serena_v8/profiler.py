@@ -14,17 +14,13 @@ Measures where time actually goes in the request path:
 Then reports P50/P95/P99 per stage, per tool, per project.
 """
 
-import os
-import sys
-import json
 import time
 import threading
 import statistics
-import traceback
 import cProfile
 import pstats
 import io
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any
 from contextlib import contextmanager
 from pathlib import Path
 from collections import defaultdict
@@ -331,7 +327,7 @@ def generate_report() -> str:
     
     if 'total_ms' in stats:
         total = stats['total_ms']
-        lines.append(f"Total Time:")
+        lines.append("Total Time:")
         lines.append(f"  P50: {total['p50']:>8.2f}ms")
         lines.append(f"  P95: {total['p95']:>8.2f}ms")
         lines.append(f"  P99: {total['p99']:>8.2f}ms")
@@ -339,23 +335,23 @@ def generate_report() -> str:
         lines.append(f"  Max: {total['max']:>8.2f}ms")
     
     if 'stages' in stats:
-        lines.append(f"\nStage Breakdown:")
+        lines.append("\nStage Breakdown:")
         for stage, s in sorted(stats['stages'].items(), key=lambda x: -x[1]['total_ms']):
             lines.append(f"  {stage:<20} P50: {s['p50_ms']:>8.2f}ms  P95: {s['p95_ms']:>8.2f}ms  Total: {s['total_ms']:>10.2f}ms")
     
     if 'bottlenecks' in hotspots:
-        lines.append(f"\nHotspots (where time is spent):")
+        lines.append("\nHotspots (where time is spent):")
         for b in hotspots['bottlenecks']:
             bar = "#" * int(b['percentage'] / 2)
             lines.append(f"  {b['stage']:<20} {b['percentage']:>5.1f}% {bar}")
     
     if tools:
-        lines.append(f"\nPer-Tool Breakdown:")
+        lines.append("\nPer-Tool Breakdown:")
         for tool, t in sorted(tools.items(), key=lambda x: -x[1]['avg_ms']):
             lines.append(f"  {tool:<20} Count: {t['count']:>4}  P50: {t['p50_ms']:>8.2f}ms  P95: {t['p95_ms']:>8.2f}ms  Avg: {t['avg_ms']:>8.2f}ms  Errors: {t['errors']}")
     
     if slowest:
-        lines.append(f"\nSlowest Requests:")
+        lines.append("\nSlowest Requests:")
         for s in slowest[:5]:
             lines.append(f"  {s['tool']:<20} {s['total_ms']:>10.2f}ms  {s.get('project', '')[:50]}")
     

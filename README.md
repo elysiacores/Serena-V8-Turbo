@@ -332,6 +332,8 @@ Transport success alone does **not** count as a passing benchmark.
 The release gate runs:
 
 ```text
+full-repo Ruff + compile check
+    ↓
 regression tests
     ↓
 clean-wheel install smoke
@@ -366,9 +368,13 @@ Default guardrails are intentionally broad enough for variable CI hardware while
 
 ### Fresh install or upgrade
 
+For a reproducible install, pin the release tag:
+
 ```bash
-uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a1'
 ```
+
+Use the untagged repository URL only when you intentionally want the latest `main` development build.
 
 Verify:
 
@@ -395,10 +401,10 @@ SERENA_V8_SOURCE=. ./scripts/install-v8.sh
 
 ### Upgrade
 
-Run the same replacement operation:
+Install the target release tag explicitly:
 
 ```bash
-uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a1'
 serena-v8-doctor
 ```
 
@@ -411,10 +417,10 @@ uv tool install --force serena-agent
 serena --version
 ```
 
-To return to V8:
+To return to this V8 release:
 
 ```bash
-uv tool install --force git+https://github.com/elysiacores/Serena-V8-Turbo.git
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a1'
 ```
 
 > **Do not manually copy V8 files into `site-packages`. Do not install a legacy `serena-v8` distribution beside `serena-agent`.**

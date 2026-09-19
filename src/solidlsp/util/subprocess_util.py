@@ -294,7 +294,7 @@ def _signal_process_tree(process: subprocess.Popen[bytes], terminate: bool = Tru
                 p.terminate()
             else:
                 p.kill()
-        except:
+        except Exception:
             pass
 
     # Try to get the parent process

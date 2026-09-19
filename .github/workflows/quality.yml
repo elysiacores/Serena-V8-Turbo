@@ -5,6 +5,20 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      - name: Sync development environment
+        run: uv sync --extra dev
+      - name: Enforce repository lint baseline
+        run: uv run ruff check src benchmarks tests
+      - name: Compile Python sources
+        run: uv run python -m compileall -q src benchmarks tests
+
   test:
     runs-on: ubuntu-latest
     strategy:

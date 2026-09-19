@@ -2,7 +2,6 @@ import re
 import unittest
 from unittest.mock import patch
 
-import serena.project  # initialize the normal Serena/SolidLSP import stack first
 from serena.util.file_proxy import FileCollection, FileProxy
 from serena.util.text_utils import search_files, search_text
 

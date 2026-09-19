@@ -156,7 +156,7 @@ class DiagnosticsDiff:
         for edited_file_path in edited_files:
             try:
                 language_server = symbol_retriever.get_language_server(edited_file_path.after_relative_path)
-            except:
+            except Exception:
                 continue
 
             published_diagnostics = language_server.request_published_text_document_diagnostics(
@@ -172,7 +172,7 @@ class DiagnosticsDiff:
                         edited_file_path.after_relative_path,
                         min_severity=2,
                     )
-                except:
+                except Exception:
                     published_diagnostics = None
             if published_diagnostics is None:
                 continue

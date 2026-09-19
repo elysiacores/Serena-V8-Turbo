@@ -44,7 +44,7 @@ class APIError(SerenaClientError):
         try:
             error_data = response.json()
             message = error_data.get("error", response.text)
-        except:
+        except Exception:
             message = response.text
         super().__init__(message)
 
@@ -262,7 +262,7 @@ class JetBrainsPluginClient(ToStringMixin):
             resolved_plugin_path = str(Path(plugin_path).resolve())
             if resolved_plugin_path == resolved_serena_path:
                 return True
-        except:
+        except Exception:
             pass
 
         def normalise_wsl_mnt(path_str: str) -> str:
@@ -365,7 +365,8 @@ class JetBrainsPluginClient(ToStringMixin):
 
         :response: the response in which to convert keys (dictionary or list)
         """
-        to_snake_case = lambda s: "".join(["_" + c.lower() if c.isupper() else c for c in s])
+        def to_snake_case(s):
+            return "".join(["_" + c.lower() if c.isupper() else c for c in s])
 
         def convert(x):
             if isinstance(x, dict):
@@ -393,8 +394,8 @@ class JetBrainsPluginClient(ToStringMixin):
                 else:
                     del symbol[key]
 
-        def convert_symbol_list(l: list) -> None:
-            for s in l:
+        def convert_symbol_list(symbols: list) -> None:
+            for s in symbols:
                 convert_html("documentation", s)
                 convert_html("quick_info", s)
                 if "children" in s:

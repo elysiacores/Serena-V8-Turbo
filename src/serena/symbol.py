@@ -637,7 +637,8 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
             result["body"] = self.body
 
         if child_inclusion_predicate is None:
-            child_inclusion_predicate = lambda s: True
+            def child_inclusion_predicate(s):
+                return True
 
         def included_children(s: Self) -> list[LanguageServerSymbol.OutputDict]:
             children = []
@@ -1447,9 +1448,9 @@ class SymbolDictGrouper(Generic[TSymbolDict], ABC):
         self._collapse_singleton = collapse_singleton
         self._is_enabled = True
 
-    def _group_by(self, l: list[dict], keys: list[str], children_keys: list[str], is_children: bool) -> dict[str, Any] | list[Any]:
+    def _group_by(self, items: list[dict], keys: list[str], children_keys: list[str], is_children: bool) -> dict[str, Any] | list[Any]:
         """
-        :param l: the list of symbol dictionaries to group
+        :param items: the list of symbol dictionaries to group
         :param keys: the keys to group by
         :param children_keys: the keys to group the children by
         :param is_children: whether this is a children grouping operation
@@ -1458,7 +1459,7 @@ class SymbolDictGrouper(Generic[TSymbolDict], ABC):
         if len(keys) > 0:
             # group by the first key
             grouped: dict[str, Any] = {}
-            for item in l:
+            for item in items:
                 key_value = item.pop(keys[0], "unknown")
                 if key_value not in grouped:
                     grouped[key_value] = []
@@ -1469,12 +1470,12 @@ class SymbolDictGrouper(Generic[TSymbolDict], ABC):
             return grouped
         else:
             # grouping is complete; now group the children if necessary
-            for item in l:
+            for item in items:
                 if self._children_key in item:
                     children = item[self._children_key]
                     item[self._children_key] = self._group_by(children, children_keys, children_keys, is_children=True)
             # post-process final items
-            return [self._transform_item(item, is_children) for item in l]
+            return [self._transform_item(item, is_children) for item in items]
 
     def _transform_item(self, item: dict, is_child: bool) -> dict:
         """
