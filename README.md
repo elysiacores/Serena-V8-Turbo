@@ -26,16 +26,15 @@ V8 is a **drop-in overlay** on Serena. It preserves the existing MCP protocol, C
 
 Benchmarks separate cold LSP startup from warm tool dispatch because they are different costs and depend on language servers and workspace size:
 
-- **Cold MCP initialization with normal V8 prewarm:** `tummun` measured approximately **2,220 ms**; the first `list_dir` after readiness took approximately **8 ms**.
-- **Warm MCP tool dispatch (standardized probe mode):** `list_dir` was measured for 5 rounds per workspace using the production overlay and real JSON-RPC stdio. The probe excludes LSP prewarm so it does not create duplicate LSP processes.
+- **Cold MCP initialization with normal V8 prewarm:** `Test Workspace C` measured approximately **2,220 ms**; the first `list_dir` after readiness took approximately **8 ms**.
+- **Warm MCP tool dispatch (standardized probe mode):** `list_dir` was measured for 5 rounds per test workspace using the production overlay and real JSON-RPC stdio. The probe excludes LSP prewarm so it does not create duplicate LSP processes.
 
-| Workspace | Tools | Warm `list_dir` min | Median | Average | Max |
+| Test workspace | Tools | Warm `list_dir` min | Median | Average | Max |
 |---|---:|---:|---:|---:|---:|
-| inspi365 | 36 | 5.22 ms | 6.76 ms | 7.57 ms | 12.78 ms |
-| TP | 36 | 5.67 ms | 6.80 ms | 8.68 ms | 15.26 ms |
-| Tummun | 36 | 3.27 ms | 3.68 ms | 4.55 ms | 8.47 ms |
-| Makinni | 36 | 3.40 ms | 3.96 ms | 4.72 ms | 8.42 ms |
-| TPOS | 36 | 14.05 ms | 23.15 ms | 21.51 ms | 29.84 ms |
+| Test Workspace A | 36 | 5.22 ms | 6.76 ms | 7.57 ms | 12.78 ms |
+| Test Workspace B | 36 | 5.67 ms | 6.80 ms | 8.68 ms | 15.26 ms |
+| Test Workspace C | 36 | 3.27 ms | 3.68 ms | 4.55 ms | 8.47 ms |
+| Test Workspace D | 36 | 3.40 ms | 3.96 ms | 4.72 ms | 8.42 ms |
 
 These are **measured production-overlay benchmarks**, not synthetic figures. They should not be interpreted as the latency of every semantic query, especially `find_symbol`, references, and diagnostics, which depend on LSP state and repository contents.
 
@@ -101,12 +100,9 @@ The standalone V8 daemon/index/cache modules remain diagnostic/experimental comp
 - Serena V8: `8.0.0-dev.1`
 - Live tools: **36/36**
 - Regression/integration tests: **19/19 passed**
-- Functional MCP probe: **5/5 Workspaces passed**
-- Local readiness: **5/5 ports ready**
+- Functional MCP probe: **4/4 test workspaces passed**
+- Local readiness: **4/4 test workspace endpoints ready**
 - Memory policy: `MemoryHigh=1.4G`, `MemoryMax=2G` per Tunnel
-- TPOS: local MCP healthy, remote Tunnel remains `AUTH_BLOCKED` because of external `401 tunnel_use_forbidden`
-
-The TPOS authorization state is not a V8 code failure. It requires a runtime principal with permission to use that Tunnel or recreating the Tunnel under the owning organization.
 
 ## 🚀 Installation
 
