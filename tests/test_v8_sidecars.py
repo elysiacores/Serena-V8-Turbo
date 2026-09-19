@@ -1,10 +1,9 @@
 import json
-import os
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from serena_v8.sidecars import (
     SidecarConfig,
@@ -12,6 +11,7 @@ from serena_v8.sidecars import (
     SidecarRunner,
     SidecarStatus,
     WorkspaceCgcIndexer,
+    _CgcGatewayClient,
 )
 
 
@@ -69,6 +69,21 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(result.status, SidecarStatus.UNAVAILABLE)
             self.assertIn("not found", result.error.lower())
 
+    def test_cgc_gateway_inherits_owner_process_group(self):
+        with tempfile.TemporaryDirectory() as root:
+            client = _CgcGatewayClient(SidecarConfig.from_environment(root, environ={}))
+            process = Mock()
+            process.poll.return_value = None
+            with (
+                patch("serena_v8.sidecars.subprocess.Popen", return_value=process) as popen,
+                patch.object(client, "_request", return_value={}),
+            ):
+                client.start()
+
+            kwargs = popen.call_args.kwargs
+            self.assertFalse(kwargs.get("start_new_session", False))
+            client._process = None
+
     def test_timeout_is_bounded(self):
         with tempfile.TemporaryDirectory() as root:
             config = SidecarConfig.from_environment(root, environ={"SERENA_V8_SIDECAR_TIMEOUT_MS": "250"})
@@ -121,6 +136,16 @@ class SidecarRunnerTests(unittest.TestCase):
             result = runner.cgc_query("find callers")
             self.assertEqual(result.status, SidecarStatus.OK)
             self.assertIn(str(Path(root).resolve()), runner.last_command)
+
+    def test_cgc_relationship_normalizes_qualified_method_when_path_scoped(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = SidecarConfig.from_environment(root, environ={"SERENA_V8_CGC_BIN": "cgc-test"})
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "graph\n", ""))
+            result = runner.cgc_callees("Example.execute", "src/sample.py")
+            self.assertEqual(result.status, SidecarStatus.OK)
+            self.assertIn("calls", runner.last_command)
+            self.assertIn("execute", runner.last_command)
+            self.assertNotIn("Example.execute", runner.last_command)
 
     def test_cgc_query_cache_reuses_successful_workspace_query(self):
         with tempfile.TemporaryDirectory() as root:
@@ -222,6 +247,29 @@ class SidecarRunnerTests(unittest.TestCase):
             payload = runner.ast_grep_search("$X", "python", ".").to_dict()
             json.dumps(payload)
             self.assertEqual(payload["workspace_root"], str(Path(root).resolve()))
+
+    def test_cgc_snapshot_ignores_generated_python_cache_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "sample.py"
+            source.write_text("value = 1\n")
+            def executor(command, **kwargs):
+                if "--path" in command:
+                    Path(command[command.index("--path") + 1]).mkdir(parents=True, exist_ok=True)
+                return 0, "indexed", ""
+
+            runner = SidecarRunner(
+                SidecarConfig.from_environment(root, environ={}),
+                executor=executor,
+            )
+            indexer = WorkspaceCgcIndexer(runner)
+            try:
+                self.assertEqual(indexer.wait(indexer.submit(path="."), timeout=2)["state"], "completed")
+                cache = Path(root) / "__pycache__"
+                cache.mkdir()
+                (cache / "sample.cpython-313.pyc").write_bytes(b"generated")
+                self.assertEqual(indexer.stale_paths(), [])
+            finally:
+                indexer.shutdown()
 
 
 if __name__ == "__main__":

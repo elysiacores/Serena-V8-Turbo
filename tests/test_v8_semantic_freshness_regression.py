@@ -86,3 +86,75 @@ class SemanticFreshnessRegressionTests(unittest.TestCase):
                 created.unlink()
                 self.assertEqual(notifier.poll_and_notify(), 1)
                 self.assertEqual(events[-1]['type'], FileChangeType.Deleted)
+
+    def test_known_change_notifies_without_workspace_poll(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "module.py"
+            source.write_text("value = 1\n")
+            events = []
+            ls = SimpleNamespace(
+                server=SimpleNamespace(notify=SimpleNamespace(did_change_watched_files=lambda p: events.extend(p["changes"]))),
+                is_ignored_path=lambda *a, **kw: False,
+                open_file=lambda p: nullcontext(),
+            )
+            project = SimpleNamespace(
+                project_root=directory,
+                gather_source_files=lambda: (_ for _ in ()).throw(AssertionError("known edit must not scan workspace")),
+            )
+            manager = SimpleNamespace(iter_language_servers=lambda: iter([ls]))
+            notifier = LanguageServerFileChangeNotifier(project, manager, initial_poll=False)
+
+            self.assertEqual(notifier.notify_known_change("module.py"), 1)
+            self.assertEqual(events[-1]["type"], FileChangeType.Created)
+            source.write_text("value = 2\n")
+            self.assertEqual(notifier.notify_known_change("module.py"), 1)
+            self.assertEqual(events[-1]["type"], FileChangeType.Changed)
+            source.unlink()
+            self.assertEqual(notifier.notify_known_change("module.py"), 1)
+            self.assertEqual(events[-1]["type"], FileChangeType.Deleted)
+
+    def test_stable_tree_skips_recursive_rediscovery_but_keeps_edit_freshness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "module.py"
+            source.write_text("value = 1\n")
+            events = []
+            discoveries = 0
+
+            def gather_tree():
+                nonlocal discoveries
+                discoveries += 1
+                return [path.name for path in root.glob("*.py")], [""]
+
+            ls = SimpleNamespace(
+                server=SimpleNamespace(notify=SimpleNamespace(did_change_watched_files=lambda p: events.extend(p["changes"]))),
+                is_ignored_path=lambda *a, **kw: False,
+                open_file=lambda p: nullcontext(),
+            )
+            project = SimpleNamespace(
+                project_root=directory,
+                _gather_source_tree=gather_tree,
+                gather_source_files=lambda: (_ for _ in ()).throw(AssertionError("fallback discovery should not run")),
+            )
+            manager = SimpleNamespace(iter_language_servers=lambda: iter([ls]))
+            notifier = LanguageServerFileChangeNotifier(project, manager)
+
+            self.assertEqual(discoveries, 1)
+            self.assertEqual(notifier.poll_and_notify(), 0)
+            self.assertEqual(discoveries, 1)
+
+            stamp = source.stat()
+            source.write_text("value = 2\n")
+            os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            self.assertEqual(notifier.poll_and_notify(), 1)
+            self.assertEqual(events[-1]["type"], FileChangeType.Changed)
+            self.assertEqual(discoveries, 1)
+
+            created = root / "caller.py"
+            created.write_text("from module import value\n")
+            root_stat = root.stat()
+            os.utime(root, ns=(root_stat.st_atime_ns, root_stat.st_mtime_ns + 1_000_000))
+            self.assertEqual(notifier.poll_and_notify(), 1)
+            self.assertEqual(events[-1]["type"], FileChangeType.Created)
+            self.assertEqual(discoveries, 2)

@@ -23,8 +23,11 @@ class LSPDocumentSync:
     """Synchronize the existing active project's native language servers."""
 
     def notify_changed(self, relative_path: str, project: "Project") -> bool:
-        """Never load a second project or create another language-server manager."""
+        """Notify one known edit, falling back to legacy full polling adapters."""
         try:
+            notify_known = getattr(project, "ls_notify_file_changed", None)
+            if callable(notify_known):
+                return bool(notify_known(relative_path))
             project.get_language_server_manager_or_raise().sync_file_system_changes()
             return True
         except Exception:

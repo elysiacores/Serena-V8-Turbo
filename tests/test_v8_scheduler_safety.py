@@ -6,26 +6,17 @@ from serena_v8.scheduler import Lane, SmartScheduler
 
 
 class SchedulerSafetyTests(unittest.TestCase):
-    def test_completed_request_cancels_its_deadline_timer(self):
+    def test_completed_request_uses_no_per_request_timer(self):
         from unittest.mock import patch
 
-        timers = []
-        real_timer = threading.Timer
-
-        def track_timer(*args, **kwargs):
-            timer = real_timer(*args, **kwargs)
-            timers.append(timer)
-            return timer
-
-        with patch("serena_v8.scheduler.threading.Timer", side_effect=track_timer):
-            future, _ = SmartScheduler().submit("read_file", {}, "project", lambda: "done")
-            self.assertEqual(future.result(1), "done")
+        scheduler = SmartScheduler()
         try:
-            self.assertTrue(timers[0].finished.is_set(), "completed request retained until deadline")
+            with patch("serena_v8.scheduler.threading.Timer", side_effect=AssertionError("per-request timer created")):
+                future, _ = scheduler.submit("read_file", {}, "project", lambda: "done")
+                self.assertEqual(future.result(1), "done")
+            self.assertEqual(scheduler.stats()["pending_deadlines"], 0)
         finally:
-            for timer in timers:
-                timer.cancel()
-                timer.join(1)
+            scheduler.shutdown()
 
     def test_running_write_cannot_report_timeout_before_its_last_side_effect(self):
         scheduler = SmartScheduler()

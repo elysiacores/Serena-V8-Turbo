@@ -7,9 +7,10 @@ from collections import defaultdict
 from copy import copy
 from dataclasses import asdict, dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
-from anthropic.types import MessageParam, MessageTokensCount
-from dotenv import load_dotenv
+if TYPE_CHECKING:
+    from anthropic.types import MessageTokensCount
 
 log = logging.getLogger(__name__)
 
@@ -56,13 +57,15 @@ class AnthropicTokenCount(TokenCountEstimator):
 
         self._model_name = model_name
         if api_key is None:
+            from dotenv import load_dotenv
+
             load_dotenv()
         self._anthropic_client = anthropic.Anthropic(api_key=api_key)
 
-    def _send_count_tokens_request(self, text: str) -> MessageTokensCount:
+    def _send_count_tokens_request(self, text: str) -> "MessageTokensCount":
         return self._anthropic_client.messages.count_tokens(
             model=self._model_name,
-            messages=[MessageParam(role="user", content=text)],
+            messages=[{"role": "user", "content": text}],
         )
 
     def estimate_token_count(self, text: str) -> int:

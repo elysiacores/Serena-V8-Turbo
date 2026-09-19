@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,30 @@ NAME_PATH_SEP = "/"
 
 # ═══ V8 Query Cache (in-source) ═══
 
+_V8_PROJECT_GENERATIONS: dict[str, int] = {}
+_V8_PROJECT_GENERATIONS_LOCK = threading.Lock()
+_V8_GENERATION_MARKER = ":__v8g__="
+
+
+def _project_generation_token(project_root: str) -> str:
+    canonical = os.path.realpath(os.path.abspath(project_root))
+    return hashlib.blake2s(canonical.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _project_generation(project_root: str) -> tuple[str, int]:
+    token = _project_generation_token(project_root)
+    with _V8_PROJECT_GENERATIONS_LOCK:
+        return token, _V8_PROJECT_GENERATIONS.get(token, 0)
+
+
+def _bump_project_generation(project_root: str) -> int:
+    token = _project_generation_token(project_root)
+    with _V8_PROJECT_GENERATIONS_LOCK:
+        generation = _V8_PROJECT_GENERATIONS.get(token, 0) + 1
+        _V8_PROJECT_GENERATIONS[token] = generation
+        return generation
+
+
 class _V8QueryCache:
     """Lightweight LRU cache with TTL for query results."""
 
@@ -46,6 +71,22 @@ class _V8QueryCache:
             if key not in self._cache:
                 self.misses += 1
                 return None
+
+            if _V8_GENERATION_MARKER in key:
+                generation_spec = key.rsplit(_V8_GENERATION_MARKER, 1)[1]
+                try:
+                    token, encoded_generation = generation_spec.split(",", 1)
+                    with _V8_PROJECT_GENERATIONS_LOCK:
+                        current_generation = _V8_PROJECT_GENERATIONS.get(token, 0)
+                    if int(encoded_generation) != current_generation:
+                        self._cache.pop(key, None)
+                        self.misses += 1
+                        return None
+                except (TypeError, ValueError):
+                    self._cache.pop(key, None)
+                    self.misses += 1
+                    return None
+
             entry = self._cache[key]
             if time.time() - entry["created"] > self._ttl:
                 del self._cache[key]
@@ -70,20 +111,17 @@ class _V8QueryCache:
                 del self._cache[k]
 
     def invalidate_project_file(self, file_path: str, project_root: str):
-        """Invalidate semantic results for one workspace, preserving others."""
-        canonical = os.path.realpath(os.path.abspath(project_root))
-        marker = f":{canonical}:"
-        with self._lock:
-            for key in [key for key in self._cache if marker in key]:
-                del self._cache[key]
+        """Invalidate a workspace generation in O(1).
+
+        A single edited file can change project-wide references and implementations,
+        so correctness requires a project semantic epoch bump even though the edit
+        itself is path-scoped.
+        """
+        _bump_project_generation(project_root)
 
     def invalidate_project(self, project_root: str) -> None:
-        """Invalidate every cached semantic query for one canonical workspace."""
-        canonical = os.path.realpath(os.path.abspath(project_root))
-        marker = f":{canonical}:"
-        with self._lock:
-            for key in [key for key in self._cache if marker in key]:
-                del self._cache[key]
+        """Invalidate every semantic query for a workspace in O(1)."""
+        _bump_project_generation(project_root)
 
     def clear(self):
         """Clear all projects; reserved for explicit cache reset."""
@@ -104,9 +142,11 @@ _v8_symbol_cache = _V8QueryCache(max_entries=500, ttl_seconds=1800)
 
 
 def make_v8_cache_key(operation: str, project_root: str, *parts: object) -> str:
-    """Build a stable, project-isolated key using the canonical project path."""
+    """Build a stable project-isolated key carrying the current semantic epoch."""
     canonical_root = os.path.realpath(os.path.abspath(project_root))
-    return ":".join([operation, canonical_root, *(str(part) for part in parts)])
+    token, generation = _project_generation(canonical_root)
+    base = ":".join([operation, canonical_root, *(str(part) for part in parts)])
+    return f"{base}{_V8_GENERATION_MARKER}{token},{generation}"
 
 
 @dataclass
@@ -1093,6 +1133,7 @@ class LanguageServerSymbolRetriever:
         start_line: int = 0,
         end_line: int = -1,
         min_severity: int = 4,
+        allow_cached: bool = False,
     ) -> list[ls_types.Diagnostic]:
         """
         Get diagnostics for a file, optionally restricted to a line range and minimum severity.
@@ -1101,9 +1142,19 @@ class LanguageServerSymbolRetriever:
         :param start_line: the first 0-based line to include.
         :param end_line: the last 0-based line to include. `-1` means until end of file.
         :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
+        :param allow_cached: return already-published diagnostics when freshness was verified by the caller.
         :return: the diagnostics matching the requested constraints.
         """
         lang_server = self.get_language_server(relative_file_path)
+        if allow_cached:
+            cached = lang_server.get_cached_published_text_document_diagnostics(
+                relative_file_path=relative_file_path,
+                start_line=start_line,
+                end_line=end_line,
+                min_severity=min_severity,
+            )
+            if cached is not None:
+                return cached
         return lang_server.request_text_document_diagnostics(
             relative_file_path=relative_file_path,
             start_line=start_line,
@@ -1148,7 +1199,12 @@ class LanguageServerSymbolRetriever:
             return None
         return self._normalize_symbol_for_diagnostics(LanguageServerSymbol(symbol_dict))
 
-    def _get_diagnostics_for_symbol(self, symbol: LanguageServerSymbol, min_severity: int) -> list[ls_types.Diagnostic]:
+    def _get_diagnostics_for_symbol(
+        self,
+        symbol: LanguageServerSymbol,
+        min_severity: int,
+        allow_cached: bool = False,
+    ) -> list[ls_types.Diagnostic]:
         relative_path = symbol.relative_path
         if relative_path is None:
             return []
@@ -1166,6 +1222,7 @@ class LanguageServerSymbolRetriever:
             start_line=start_line,
             end_line=end_line,
             min_severity=min_severity,
+            allow_cached=allow_cached,
         )
 
     def get_symbol_diagnostics(
@@ -1174,6 +1231,7 @@ class LanguageServerSymbolRetriever:
         reference_file: str | None = None,
         check_symbol_references: bool = False,
         min_severity: int = 4,
+        allow_cached: bool = False,
     ) -> dict[LanguageServerSymbol, list[ls_types.Diagnostic]]:
         """
         Get diagnostics for the specified symbol and, optionally, for all symbols that reference it.
@@ -1182,6 +1240,7 @@ class LanguageServerSymbolRetriever:
         :param reference_file: optional file path used to disambiguate the symbol search.
         :param check_symbol_references: whether to additionally collect diagnostics for referencing symbols.
         :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
+        :param allow_cached: return already-published diagnostics when freshness was verified by the caller.
         :return: a mapping from symbols to the diagnostics that overlap their body ranges.
         """
         symbol = self.find_unique(name_path, substring_matching=False, within_relative_path=reference_file or None)
@@ -1189,6 +1248,7 @@ class LanguageServerSymbolRetriever:
             symbol.location,
             check_symbol_references=check_symbol_references,
             min_severity=min_severity,
+            allow_cached=allow_cached,
         )
 
     def get_symbol_diagnostics_by_location(
@@ -1196,6 +1256,7 @@ class LanguageServerSymbolRetriever:
         symbol_location: LanguageServerSymbolLocation,
         check_symbol_references: bool = False,
         min_severity: int = 4,
+        allow_cached: bool = False,
     ) -> dict[LanguageServerSymbol, list[ls_types.Diagnostic]]:
         """
         Get diagnostics for the symbol at the given location and, optionally, for all referencing symbols.
@@ -1203,6 +1264,7 @@ class LanguageServerSymbolRetriever:
         :param symbol_location: location of the symbol to inspect.
         :param check_symbol_references: whether to additionally collect diagnostics for referencing symbols.
         :param min_severity: minimum LSP severity to include, where 1=Error, 2=Warning, 3=Information, 4=Hint.
+        :param allow_cached: return already-published diagnostics when freshness was verified by the caller.
         :return: an ordered mapping from symbols to the diagnostics that overlap their body ranges.
         """
         if not symbol_location.has_position_in_file():
@@ -1247,7 +1309,11 @@ class LanguageServerSymbolRetriever:
 
         result: dict[LanguageServerSymbol, list[ls_types.Diagnostic]] = {}
         for current_symbol in symbols_to_check.values():
-            diagnostics = self._get_diagnostics_for_symbol(current_symbol, min_severity=min_severity)
+            diagnostics = self._get_diagnostics_for_symbol(
+                current_symbol,
+                min_severity=min_severity,
+                allow_cached=allow_cached,
+            )
             if diagnostics:
                 result[current_symbol] = diagnostics
         return result

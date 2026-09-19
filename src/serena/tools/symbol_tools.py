@@ -506,7 +506,7 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
         :param max_answer_chars: max result length; -1 for default
         :return: grouped diagnostics for the requested file.
         """
-        self.project.ls_sync_file_system_changes()
+        num_changes = self.project.ls_sync_file_system_changes()
 
         symbol_retriever = self.create_language_server_symbol_retriever()
         diagnostics = symbol_retriever.get_file_diagnostics(
@@ -514,6 +514,7 @@ class GetDiagnosticsForFileTool(Tool, ToolMarkerSymbolicRead):
             start_line=start_line,
             end_line=end_line,
             min_severity=min_severity,
+            allow_cached=num_changes == 0,
         )
 
         grouped_diagnostics = GroupedDiagnostics()
@@ -559,7 +560,7 @@ class GetDiagnosticsForSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOption
         :param max_answer_chars: max result length; -1 for default
         :return: grouped diagnostics for the requested symbol and, optionally, its referencing symbols.
         """
-        self.project.ls_sync_file_system_changes()
+        num_changes = self.project.ls_sync_file_system_changes()
 
         symbol_retriever = self.create_language_server_symbol_retriever()
         diagnostics_by_symbol = symbol_retriever.get_symbol_diagnostics(
@@ -567,6 +568,7 @@ class GetDiagnosticsForSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOption
             reference_file=reference_file or None,
             check_symbol_references=check_symbol_references,
             min_severity=min_severity,
+            allow_cached=num_changes == 0,
         )
 
         grouped_diagnostics = GroupedDiagnostics()

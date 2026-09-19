@@ -445,8 +445,10 @@ class DashboardManager:
             case self.Mode.WEBVIEW:
                 self._start_dashboard_viewer(minimized=not open_dashboard_on_launch)
             case self.Mode.TRAY_MANAGER:
-                init_fn = lambda: self._tray_manager_register(open_on_launch=open_dashboard_on_launch, active_project=active_project)
-                threading.Thread(target=init_fn, name="init-DashboardTrayManager", daemon=True).start()
+                def init_tray_manager() -> None:
+                    self._tray_manager_register(open_on_launch=open_dashboard_on_launch, active_project=active_project)
+
+                threading.Thread(target=init_tray_manager, name="init-DashboardTrayManager", daemon=True).start()
             case self.Mode.BROWSER:
                 if open_dashboard_on_launch:
                     if not system_has_usable_display():
@@ -719,7 +721,15 @@ class SerenaAgent:
             if self._gui_log_viewer is not None:
                 self._gui_log_viewer.set_dashboard_url(self._dashboard_manager.url)
 
-        self._send_usage_info()
+        self._send_usage_info_async()
+
+    def _send_usage_info_async(self) -> None:
+        """Report optional usage telemetry without blocking MCP startup."""
+        threading.Thread(
+            target=self._send_usage_info,
+            name="serena-usage-report",
+            daemon=True,
+        ).start()
 
     def _send_usage_info(self) -> None:
         if os.getenv("CI") == "true" or os.getenv("GITHUB_ACTIONS") == "true" or os.getenv("SERENA_USAGE_REPORTING") == "false":
@@ -1327,8 +1337,11 @@ class SerenaAgent:
 
         # for LSP mode, start the language server manager
         if self.get_language_backend().is_lsp():
+            if os.environ.get("SERENA_V8_SKIP_PREWARM") == "1":
+                log.debug("Skipping eager language-server initialization; semantic tools will initialize lazily")
+                return
             with LogTime("Language server initialization", logger=log):
-                self.reset_language_server_manager()
+                project.ensure_language_server_manager()
 
         # for JetBrains mode, search for plugin server and spawn IDE (if not found and launch command provided)
         elif self.get_language_backend().is_jetbrains():

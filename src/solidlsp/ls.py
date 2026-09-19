@@ -476,6 +476,10 @@ class SolidLanguageServer(ABC):
         repository_root_path = os.path.abspath(repository_root_path)
 
         ls_class = config.ls_id.get_ls_class()
+        # Bind the inverse mapping at the point where the selected implementation
+        # is already known. This prevents get_language_server_id() from scanning
+        # and importing every language-server implementation during construction.
+        setattr(ls_class, "_solidlsp_language_server_id", config.ls_id)
         # All language server implementations are required to use the same signature of the constructor
         # (which differs from the signature of the base class constructor).
         ls = ls_class(config, repository_root_path, solidlsp_settings)

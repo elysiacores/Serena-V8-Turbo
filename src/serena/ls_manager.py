@@ -306,6 +306,15 @@ class LanguageServerManager:
         log.info(f"File system polling complete; {num_changes} change events sent to language servers.")
         return num_changes
 
+    def notify_file_system_change(self, relative_path: str) -> int:
+        """Notify language servers about one file Serena already knows changed.
+
+        This bypasses the O(workspace) external-change poll while keeping the
+        notifier's fingerprint baseline in sync, so the next external poll does
+        not report the same edit a second time.
+        """
+        return self._file_change_notifier.notify_known_change(relative_path)
+
 
 class LanguageServerFileChangeNotifier:
     """
@@ -316,12 +325,178 @@ class LanguageServerFileChangeNotifier:
         self._project = project
         self._language_server_manager = language_server_manager
         self._freshness_last_seen_fingerprints: dict[str, tuple[int, int, int, bytes | None]] | None = None
+        self._freshness_directory_fingerprints: dict[str, tuple[int, int, bytes | None]] | None = None
         self._freshness_lock = threading.Lock()
 
         if initial_poll:
             # Establish the baseline for the first poll; no notifications are sent on the first call.
             with LogTime("Initialising file change notifier (polling for baseline)"):
                 self.poll_and_notify()
+
+    @staticmethod
+    def _directory_fingerprint(
+        path: str,
+        *,
+        previous_digest: bytes | None = None,
+    ) -> tuple[tuple[int, int, bytes | None], bytes | None]:
+        stat = os.stat(path)
+        metadata = (stat.st_mtime_ns, stat.st_ctime_ns)
+        strict_hash = os.name == "nt" or os.getenv("SERENA_V8_STRICT_FRESHNESS_HASH", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        try:
+            hash_window_ms = max(0, int(os.getenv("SERENA_V8_FRESHNESS_HASH_WINDOW_MS", "2000")))
+        except ValueError:
+            hash_window_ms = 2000
+        recent = time.time_ns() - max(metadata) <= hash_window_ms * 1_000_000
+        needs_digest = strict_hash or recent or previous_digest is not None
+        digest: bytes | None = None
+        if needs_digest:
+            entries: list[tuple[str, str]] = []
+            with os.scandir(path) as directory_entries:
+                for entry in directory_entries:
+                    try:
+                        kind = "d" if entry.is_dir(follow_symlinks=False) else "f" if entry.is_file(follow_symlinks=False) else "o"
+                    except OSError:
+                        kind = "o"
+                    entries.append((entry.name, kind))
+            hasher = hashlib.blake2b(digest_size=8)
+            for name, kind in sorted(entries):
+                hasher.update(kind.encode("ascii"))
+                hasher.update(b"\0")
+                hasher.update(name.encode("utf-8", errors="surrogateescape"))
+                hasher.update(b"\0")
+            digest = hasher.digest()
+        retained_digest = digest if strict_hash or recent else None
+        return (*metadata, retained_digest), digest
+
+    def _discover_source_tree(self) -> tuple[list[str], dict[str, tuple[int, int, bytes | None]]]:
+        """Run the expensive source discovery only when the directory tree changed."""
+        gather_tree = getattr(self._project, "_gather_source_tree", None)
+        if callable(gather_tree):
+            source_files, directories = gather_tree()
+        else:
+            source_files = self._project.gather_source_files()
+            directories = [""]
+            seen = {""}
+            for rel_path in source_files:
+                parent = os.path.dirname(rel_path)
+                while parent and parent not in seen:
+                    seen.add(parent)
+                    directories.append(parent)
+                    parent = os.path.dirname(parent)
+
+        directory_fingerprints: dict[str, tuple[int, int, bytes | None]] = {}
+        for rel_directory in directories:
+            path = self._project.project_root if rel_directory in {"", "."} else os.path.join(self._project.project_root, rel_directory)
+            try:
+                fingerprint, _observed_digest = self._directory_fingerprint(path)
+                directory_fingerprints[rel_directory] = fingerprint
+            except OSError:
+                # A concurrently removed directory is handled by the next poll.
+                continue
+        return source_files, directory_fingerprints
+
+    def _directory_tree_changed(self) -> bool:
+        previous = self._freshness_directory_fingerprints
+        if previous is None:
+            return True
+
+        refreshed: dict[str, tuple[int, int, bytes | None]] = {}
+        for rel_directory, fingerprint in previous.items():
+            path = self._project.project_root if rel_directory in {"", "."} else os.path.join(self._project.project_root, rel_directory)
+            try:
+                current, observed_digest = self._directory_fingerprint(path, previous_digest=fingerprint[2])
+            except OSError:
+                return True
+            if current[:2] != fingerprint[:2]:
+                return True
+            if fingerprint[2] is not None and observed_digest != fingerprint[2]:
+                return True
+            refreshed[rel_directory] = current
+
+        # Drop safety-window directory digests after one stable comparison so
+        # steady-state polling returns to metadata-only checks.
+        self._freshness_directory_fingerprints = refreshed
+        return False
+
+    def _refresh_directory_chain(self, relative_path: str) -> None:
+        """Refresh directory sentinels after an edit Serena already knows about."""
+        if self._freshness_directory_fingerprints is None:
+            self._freshness_directory_fingerprints = {}
+        parent = os.path.dirname(os.path.normpath(relative_path))
+        while True:
+            rel_directory = "" if parent in {"", "."} else parent
+            path = self._project.project_root if not rel_directory else os.path.join(self._project.project_root, rel_directory)
+            try:
+                previous = self._freshness_directory_fingerprints.get(rel_directory)
+                fingerprint, _observed_digest = self._directory_fingerprint(
+                    path,
+                    previous_digest=previous[2] if previous is not None else None,
+                )
+                self._freshness_directory_fingerprints[rel_directory] = fingerprint
+            except OSError:
+                self._freshness_directory_fingerprints.pop(rel_directory, None)
+            if not rel_directory:
+                break
+            parent = os.path.dirname(rel_directory)
+
+    def notify_known_change(self, relative_path: str) -> int:
+        """Record and notify one explicit file change without scanning the project."""
+        relative_path = os.path.normpath(relative_path)
+        abs_path = os.path.join(self._project.project_root, relative_path)
+
+        with self._freshness_lock:
+            previous = self._freshness_last_seen_fingerprints
+            existed_before = previous is not None and relative_path in previous
+            exists_now = os.path.isfile(abs_path)
+
+            if exists_now:
+                try:
+                    stat = os.stat(abs_path)
+                except OSError:
+                    return 0
+                fingerprint = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, None)
+                change_type = FileChangeType.Changed if existed_before else FileChangeType.Created
+                if previous is None:
+                    self._freshness_last_seen_fingerprints = {relative_path: fingerprint}
+                else:
+                    previous[relative_path] = fingerprint
+            else:
+                if not existed_before:
+                    return 0
+                change_type = FileChangeType.Deleted
+                assert previous is not None
+                previous.pop(relative_path, None)
+
+            # Keep directory sentinels aligned so Serena-owned create/delete
+            # operations do not force a redundant full workspace discovery.
+            self._refresh_directory_chain(relative_path)
+
+        event: FileEvent = {
+            "uri": Path(self._project.project_root, relative_path).resolve().as_uri(),
+            "type": change_type,
+        }
+        params: DidChangeWatchedFilesParams = {"changes": [event]}
+        for ls in self._language_server_manager.iter_language_servers():
+            is_ignored = getattr(ls, "is_ignored_path", None)
+            if callable(is_ignored) and is_ignored(relative_path, ignore_unsupported_files=True):
+                continue
+            try:
+                ls.server.notify.did_change_watched_files(params)
+            except Exception as exc:
+                log.error("Failed to notify language server of known file change", exc_info=exc)
+
+            if change_type == FileChangeType.Created:
+                try:
+                    with ls.open_file(relative_path):
+                        pass
+                except Exception as exc:
+                    log.error("Failed to refresh newly created file %r in language server", relative_path, exc_info=exc)
+
+        return 1
 
     def poll_and_notify(self) -> int:
         """
@@ -333,9 +508,24 @@ class LanguageServerFileChangeNotifier:
         within a short safety window also keep a digest, covering coarse timestamp
         filesystems and edit races without hashing the whole stable workspace.
         Windows and SERENA_V8_STRICT_FRESHNESS_HASH=1 hash every tracked file.
+
+        After the initial discovery, stable directory metadata lets us avoid the
+        expensive recursive source-tree scan. Existing tracked files are still
+        stat'ed every poll, so ordinary external edits remain immediately visible.
+        A create/delete/rename changes a watched directory fingerprint and triggers
+        a full discovery on that poll.
         """
         with self._freshness_lock:
             previous = self._freshness_last_seen_fingerprints
+            full_discovery = previous is None or self._directory_tree_changed()
+            if full_discovery:
+                source_files, directory_fingerprints = self._discover_source_tree()
+            else:
+                # Copy keys because a concurrent known-change notification may
+                # mutate the baseline after this lock is released in the future.
+                source_files = list(previous)
+                directory_fingerprints = self._freshness_directory_fingerprints
+
             current: dict[str, tuple[int, int, int, bytes | None]] = {}
             events: list[tuple[str, FileChangeType]] = []
             strict_hash = os.name == "nt" or os.getenv("SERENA_V8_STRICT_FRESHNESS_HASH", "").lower() in {
@@ -350,7 +540,7 @@ class LanguageServerFileChangeNotifier:
             hash_window_ns = hash_window_ms * 1_000_000
             now_ns = time.time_ns()
 
-            for rel_path in self._project.gather_source_files():
+            for rel_path in source_files:
                 path = os.path.join(self._project.project_root, rel_path)
                 try:
                     stat = os.stat(path)
@@ -383,7 +573,10 @@ class LanguageServerFileChangeNotifier:
 
             if previous is not None:
                 events.extend((rel_path, FileChangeType.Deleted) for rel_path in previous if rel_path not in current)
+
             self._freshness_last_seen_fingerprints = current
+            if full_discovery:
+                self._freshness_directory_fingerprints = directory_fingerprints
 
             if previous is None:
                 return 0

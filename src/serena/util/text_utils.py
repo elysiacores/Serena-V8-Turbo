@@ -2,8 +2,10 @@ import hashlib
 import logging
 import os
 import re
+from bisect import bisect_right
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from itertools import chain
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Self
@@ -22,6 +24,7 @@ log = logging.getLogger(__name__)
 _SEARCH_WORKERS = min(32, max(4, (os.cpu_count() or 1) * 2))
 _SEARCH_EXECUTOR = ThreadPoolExecutor(max_workers=_SEARCH_WORKERS, thread_name_prefix="serena-search")
 _SEARCH_SERIAL_THRESHOLD = 8
+_LINE_BREAK_RE = re.compile(r"\r\n|[\r\n]")
 
 
 class LineType(StrEnum):
@@ -125,7 +128,7 @@ class MatchedConsecutiveLines:
 
 
 def search_text(
-    pattern: str,
+    pattern: str | re.Pattern[str],
     content: str | None = None,
     source_file_path: str | None = None,
     context_lines_before: int = 0,
@@ -133,17 +136,11 @@ def search_text(
     multiline: bool = True,
 ) -> list[MatchedConsecutiveLines]:
     """
-    Search for a pattern in text content. Supports both regex and glob-like patterns.
+    Search for a pattern in text content. Supports both regex and precompiled patterns.
 
-    :param pattern: Pattern to search for (regex or glob-like pattern)
-    :param content: The text content to search. May be None if source_file_path is provided.
-    :param source_file_path: Optional path to the source file. If content is None,
-        this has to be passed and the file will be read.
-    :param context_lines_before: Number of context lines to include before matches
-    :param context_lines_after: Number of context lines to include after matches
-    :param multiline: whether to apply multi-line matching, enabling the flags re.DOTALL and re.MULTILINE
-    :return: List of `TextSearchMatch` objects
-    :raises: ValueError if the pattern is not valid
+    The expensive line split is deferred until the first match is known to exist.
+    Callers that search many files should pass a compiled pattern so regex compilation
+    is paid once per request instead of once per file.
     """
     if source_file_path and content is None:
         with open(source_file_path) as f:
@@ -152,31 +149,48 @@ def search_text(
     if content is None:
         raise ValueError("Pass either content or source_file_path")
 
-    matches = []
+    if isinstance(pattern, re.Pattern):
+        compiled_pattern = pattern
+    else:
+        flags = (re.MULTILINE | re.DOTALL) if multiline else 0
+        compiled_pattern = re.compile(pattern, flags)
+
+    match_iter = compiled_pattern.finditer(content)
+    first_match = next(match_iter, None)
+    if first_match is None:
+        return []
+
     lines = TextUtils.split_lines(content)
     total_lines = len(lines)
+    matches: list[MatchedConsecutiveLines] = []
 
-    # For multiline matches, optionally use DOTALL so '.' matches newlines
-    flags = (re.MULTILINE | re.DOTALL) if multiline else 0
-    compiled_pattern = re.compile(pattern, flags)
-    # Search across the entire content as a single string
-    for match in compiled_pattern.finditer(content):
+    # Build the line-position index once. TextUtils.get_line_from_index walks
+    # from the beginning of the string on every call, which makes files with
+    # many matches quadratic. The index preserves its CR/LF/CRLF semantics.
+    line_starts = [0]
+    line_starts.extend(match.end() for match in _LINE_BREAK_RE.finditer(content))
+
+    def line_col(index: int) -> tuple[int, int]:
+        # TextUtils maps the LF byte inside CRLF to the beginning of the next
+        # line, while the preceding CR still belongs to the previous line.
+        if 0 < index < len(content) and content[index - 1] == "\r" and content[index] == "\n":
+            line = bisect_right(line_starts, index + 1) - 1
+            return line, 0
+        line = bisect_right(line_starts, index) - 1
+        return line, index - line_starts[line]
+
+    for match in chain((first_match,), match_iter):
         start_pos = match.start()
         end_pos = match.end()
 
-        # Find the line numbers for the start and end positions
-        start_line_num = TextUtils.get_line_from_index(content, start_pos)
-        end_line_num = TextUtils.get_line_from_index(content, end_pos)
-        if end_line_num > start_line_num and TextUtils.get_line_col_from_index(content, end_pos)[1] == 0:
-            # `end_pos` is exclusive, so if it is at the start of a line, the match ends with the
-            # preceding line's newline and does not extend into the line that `end_pos` points to
+        start_line_num, _ = line_col(start_pos)
+        end_line_num, end_col = line_col(end_pos)
+        if end_line_num > start_line_num and end_col == 0:
             end_line_num -= 1
 
-        # Calculate the range of lines to include in the context
         context_start = max(0, start_line_num - context_lines_before)
         context_end = min(total_lines - 1, end_line_num + context_lines_after)
 
-        # Create TextLine objects for the context
         context_lines = []
         for line_num in range(context_start, context_end + 1):
             if context_start <= line_num < start_line_num:
@@ -310,53 +324,39 @@ def search_files(
     paths_exclude_glob: str | None = None,
     multiline: bool = True,
 ) -> list[MatchedConsecutiveLines]:
-    """
-    Search for a pattern in a list of files.
-
-    :param file_collection: the collection of files to search (will be optionally filtered by glob patterns)
-    :param pattern: pattern to search for
-    :param context_lines_before: number of context lines to include before matches
-    :param context_lines_after: number of context lines to include after matches
-    :param paths_include_glob: optional glob pattern to include files from the list
-    :param paths_exclude_glob: optional glob pattern to exclude files from the list
-    :param multiline: whether to apply multi-line matching, enabling the flags re.DOTALL and re.MULTILINE (default: True)
-    :return: list of MatchedConsecutiveLines objects
-    """
-    # apply glob filter
+    """Search for a regex pattern across a collection of files."""
     file_collection = file_collection.filter_glob(paths_include_glob=paths_include_glob, paths_exclude_glob=paths_exclude_glob)
     log.info(f"Processing {len(file_collection)} files.")
 
+    flags = (re.MULTILINE | re.DOTALL) if multiline else 0
+    compiled_pattern = re.compile(pattern, flags)
+
     def process_single_file(file_proxy: FileProxy) -> dict[str, Any]:
-        """Process a single file - this function will be parallelized."""
         relative_path = file_proxy.get_relative_path()
         try:
             file_content = file_proxy.get_contents()
             search_results = search_text(
-                pattern,
+                compiled_pattern,
                 content=file_content,
                 source_file_path=relative_path,
                 context_lines_before=context_lines_before,
                 context_lines_after=context_lines_after,
                 multiline=multiline,
             )
-            if len(search_results) > 0:
+            if search_results:
                 log.debug(f"Found {len(search_results)} matches in {relative_path}")
             return {"path": relative_path, "results": search_results, "error": None}
         except Exception as e:
             log.debug(f"Error processing {relative_path}: {e}")
             return {"path": relative_path, "results": [], "error": str(e)}
 
-    # Avoid pool overhead for tiny searches; otherwise reuse one bounded
-    # process-wide pool. executor.map preserves input order.
     if len(file_collection) < _SEARCH_SERIAL_THRESHOLD:
         results = [process_single_file(file_proxy) for file_proxy in file_collection]
     else:
         results = list(_SEARCH_EXECUTOR.map(process_single_file, file_collection))
 
-    # Collect results and errors
-    matches = []
-    skipped_file_error_tuples = []
-
+    matches: list[MatchedConsecutiveLines] = []
+    skipped_file_error_tuples: list[tuple[str, str]] = []
     for result in results:
         if result["error"]:
             skipped_file_error_tuples.append((result["path"], result["error"]))

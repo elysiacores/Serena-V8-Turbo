@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.serena/
 .pytest_cache/
 benchmarks/results/*
 !benchmarks/results/compare.py

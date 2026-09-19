@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,20 @@ sys.path.insert(0, str(ROOT / "src"))
 
 
 class V8RuntimeIntegrationTests(unittest.TestCase):
+    def test_analytics_does_not_import_anthropic_on_module_import(self):
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; import serena.analytics; print('anthropic' in sys.modules)",
+            ],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(probe.stdout.strip(), "False")
+
     def test_record_tool_call_updates_stats_file(self):
         from serena.v8_runtime import flush_stats, get_telemetry, record_tool_call
 
@@ -126,7 +141,7 @@ class V8RuntimeIntegrationTests(unittest.TestCase):
 
             self.assertEqual(file_path.read_text(), "new")
             self.assertEqual(project.sync_count, 1)
-            self.assertEqual(_v8_symbol_cache.stats()["entries"], 0)
+            self.assertIsNone(_v8_symbol_cache.get(cache_key))
 
     def test_create_text_file_invalidates_cache_and_syncs_lsp(self):
         from serena.symbol import _v8_symbol_cache, make_v8_cache_key
@@ -171,7 +186,7 @@ class V8RuntimeIntegrationTests(unittest.TestCase):
 
             self.assertIn("File created", result)
             self.assertEqual(project.sync_count, 1)
-            self.assertEqual(_v8_symbol_cache.stats()["entries"], 0)
+            self.assertIsNone(_v8_symbol_cache.get(cache_key))
 
 
 if __name__ == "__main__":

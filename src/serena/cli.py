@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import collections
 import glob
 import json
@@ -18,7 +20,6 @@ from sensai.util.string import dict_string
 from tqdm import tqdm
 
 from serena import serena_version
-from serena.config.client_setup import client_setup_handlers
 from serena.config.context_mode import SerenaAgentContext, SerenaAgentMode
 from serena.config.serena_config import (
     LanguageBackend,
@@ -37,12 +38,10 @@ from serena.constants import (
     SERENAS_OWN_MODE_YAMLS_DIR,
 )
 from serena.prompt_factory import SerenaPromptFactory
-from serena.tools import ActivateProjectTool
 from serena.util.cli_util import AutoRegisteringGroup
 from serena.util.logging import MemoryLogHandler
 from solidlsp.ls_config import LanguageServerId
 from solidlsp.ls_types import SymbolKind
-from solidlsp.util.subprocess_util import subprocess_kwargs
 
 if TYPE_CHECKING:
     from serena.memories.memory_manager import MemoryManager
@@ -105,6 +104,8 @@ def find_project_root(root: str | Path | None = None) -> str | None:
 
 def _open_in_editor(path: str) -> None:
     """Open the given file in the system's default editor or viewer."""
+    from solidlsp.util.subprocess_util import subprocess_kwargs
+
     editor = os.environ.get("EDITOR")
     run_kwargs = subprocess_kwargs()
     try:
@@ -133,6 +134,23 @@ class ProjectType(click.ParamType):
         if path.exists() and path.is_dir():
             return str(path)
         return value
+
+
+class ClientSetupType(click.ParamType):
+    """Validate setup client names without importing client integrations at CLI startup."""
+
+    name = "client"
+
+    def convert(self, value: str, param: click.Parameter | None, ctx: click.Context | None) -> str:
+        from serena.config.client_setup import client_setup_handlers
+
+        names = [handler.name for handler in client_setup_handlers]
+        if value in names:
+            return value
+        self.fail(f"{value!r} is not one of {', '.join(names)}", param, ctx)
+
+
+CLIENT_SETUP_TYPE = ClientSetupType()
 
 
 PROJECT_TYPE = ProjectType()
@@ -190,6 +208,8 @@ class TopLevelCommands(AutoRegisteringGroup):
         click.echo(f"Language backend: {language_backend}")
 
         # check for auto-configurable clients
+        from serena.config.client_setup import client_setup_handlers
+
         applicable_setup_handlers = []
         for setup_handler in client_setup_handlers:
             if setup_handler.is_applicable():
@@ -211,9 +231,11 @@ class TopLevelCommands(AutoRegisteringGroup):
     )
     @click.argument(
         "client",
-        type=click.Choice([h.name for h in client_setup_handlers]),
+        type=CLIENT_SETUP_TYPE,
     )
     def setup(client: str) -> None:
+        from serena.config.client_setup import client_setup_handlers
+
         # find the matching handler
         handler = next(h for h in client_setup_handlers if h.name == client)
 
@@ -367,7 +389,7 @@ class TopLevelCommands(AutoRegisteringGroup):
                 project_activation_error = (
                     f"No project root found from cwd={os.getcwd()} (no .serena/project.yml or .git found); "
                     "no project activated. If the folder is a coding project folder to be worked on, "
-                    f"activate the folder explicitly using the {ActivateProjectTool.get_name_from_cls()} tool."
+                    "activate the folder explicitly using the activate_project tool."
                 )
                 log.warning(project_activation_error)
 
@@ -712,7 +734,7 @@ class ProjectCommands(AutoRegisteringGroup):
                 try:
                     languages.append(LanguageServerId(lang.lower()))
                 except ValueError:
-                    all_langs = [l.value for l in LanguageServerId]
+                    all_langs = [language.value for language in LanguageServerId]
                     raise ValueError(f"Unknown language '{lang}'. Supported: {all_langs}")
 
         generated_conf = ProjectConfig.autogenerate(

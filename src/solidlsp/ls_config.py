@@ -940,6 +940,9 @@ class LanguageServerId(str, Enum):
         :return: The Language enum value
         :raises ValueError: If the language server class is not supported
         """
+        bound_id = getattr(ls_class, "_solidlsp_language_server_id", None)
+        if isinstance(bound_id, cls):
+            return bound_id
         for enum_instance in cls:
             if enum_instance.get_ls_class() == ls_class:
                 return enum_instance

@@ -58,6 +58,7 @@ class Project(ToStringMixin):
 
         self.language_server_manager: LanguageServerManager | None = None
         self._language_server_manager_init_error: Exception | None = None
+        self._language_server_manager_init_lock = threading.RLock()
         self.is_newly_created = is_newly_created
         self._agent: Optional["SerenaAgent"] = None
 
@@ -344,42 +345,59 @@ class Project(ToStringMixin):
             if self.is_ignored_path(relative_path):
                 raise ValueError(f"Path {relative_path} is ignored")
 
-    def gather_source_files(self, relative_path: str = "") -> list[str]:
-        """Retrieves relative paths of all source files, optionally limited to the given path
-
-        :param relative_path: if provided, restrict search to this path
-        """
-        rel_file_paths = []
+    def _gather_source_tree(self, relative_path: str = "") -> tuple[list[str], list[str]]:
+        """Return source files and visited non-ignored directories in one scan."""
         start_path = os.path.join(self.project_root, relative_path)
         if not os.path.exists(start_path):
             raise FileNotFoundError(f"Relative path {start_path} not found.")
-        if os.path.isfile(start_path):
-            return [relative_path]
-        else:
-            for root, dirs, files in os.walk(start_path, followlinks=True):
-                # prevent recursion into ignored directories
-                dirs[:] = [d for d in dirs if not self.is_ignored_path(os.path.join(root, d))]
 
-                # collect non-ignored files
-                for file in files:
-                    abs_file_path = os.path.join(root, file)
-                    try:
-                        if not self.is_ignored_path(abs_file_path, ignore_non_source_files=True):
-                            try:
-                                rel_file_path = os.path.relpath(abs_file_path, start=self.project_root)
-                            except Exception:
-                                log.warning(
-                                    "Ignoring path '%s' because it appears to be outside of the project root (%s)",
-                                    abs_file_path,
-                                    self.project_root,
-                                )
+        source_matchers = ()
+        if self.language_backend.is_lsp():
+            source_matchers = tuple(language.get_source_fn_matcher() for language in self.project_config.language_servers)
+
+        def is_supported_source(path: str) -> bool:
+            return not source_matchers or any(matcher.is_relevant_filename(path) for matcher in source_matchers)
+
+        if os.path.isfile(start_path):
+            parent = os.path.dirname(relative_path)
+            directories = [parent] if parent else [""]
+            if not is_supported_source(start_path):
+                return [], directories
+            files = [] if self._is_ignored_relative_path(relative_path, ignore_non_source_files=False) else [relative_path]
+            return files, directories
+
+        rel_file_paths: list[str] = []
+        rel_directory_paths: list[str] = []
+        stack = [os.path.abspath(start_path)]
+        while stack:
+            directory = stack.pop()
+            rel_directory = os.path.relpath(directory, start=self.project_root)
+            rel_directory_paths.append("" if rel_directory == "." else rel_directory)
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_symlink():
                                 continue
-                            rel_file_paths.append(rel_file_path)
-                    except FileNotFoundError:
-                        log.warning(
-                            f"File {abs_file_path} not found (possibly due it being a symlink), skipping it in request_parsed_files",
-                        )
-            return rel_file_paths
+                            rel_path = os.path.relpath(entry.path, start=self.project_root)
+                            if entry.is_dir(follow_symlinks=False):
+                                if not self._is_ignored_relative_path(rel_path, ignore_non_source_files=False):
+                                    stack.append(entry.path)
+                            elif entry.is_file(follow_symlinks=False):
+                                if not is_supported_source(entry.path):
+                                    continue
+                                if not self._is_ignored_relative_path(rel_path, ignore_non_source_files=False):
+                                    rel_file_paths.append(rel_path)
+                        except (FileNotFoundError, PermissionError, OSError):
+                            log.debug("Skipping transient/unreadable path %s", entry.path, exc_info=True)
+            except (FileNotFoundError, PermissionError, OSError):
+                log.debug("Skipping transient/unreadable directory %s", directory, exc_info=True)
+        return rel_file_paths, rel_directory_paths
+
+    def gather_source_files(self, relative_path: str = "") -> list[str]:
+        """Retrieve source files with one bounded, symlink-safe directory scan."""
+        files, _directories = self._gather_source_tree(relative_path)
+        return files
 
     def _create_file_collection(self, relative_path: str, *, code_files_only: bool, skip_ignored_files: bool) -> FileCollection:
         """
@@ -479,58 +497,69 @@ class Project(ToStringMixin):
             source_file_path=relative_file_path,
         )
 
+    def ensure_language_server_manager(self) -> LanguageServerManager:
+        """Return the project LSP manager, creating it once if needed.
+
+        Startup callers use this idempotent path. Explicit reset operations keep
+        using ``create_language_server_manager`` so restart semantics stay
+        separate from ordinary lazy/eager initialization.
+        """
+        manager = self.language_server_manager
+        if manager is not None:
+            return manager
+        with self._language_server_manager_init_lock:
+            manager = self.language_server_manager
+            if manager is not None:
+                return manager
+            return self.create_language_server_manager()
+
     def create_language_server_manager(self) -> LanguageServerManager:
-        """
-        Creates the language server manager for the project, starting one language server per configured programming language.
+        """Create or explicitly restart the project's language-server manager."""
+        with self._language_server_manager_init_lock:
+            try:
+                self.project_config.await_asynchronous_completion()
 
-        :return: the language server manager, which is also stored in the project instance
-        """
-        try:
-            # ensure that the project configuration, particularly the list of languages is complete,
-            # despite asynchronous first-time project configuration generation (which may not have completed yet)
-            self.project_config.await_asynchronous_completion()
-
-            # determine timeout to use for LS calls
-            tool_timeout = self.serena_config.tool_timeout
-            if tool_timeout is None or tool_timeout < 0:
-                ls_timeout = None
-            else:
-                if tool_timeout < 10:
-                    raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
-                ls_timeout = tool_timeout - 5  # the LS timeout is for a single call, it should be smaller than the tool timeout
-
-            # if there is an existing instance, stop its language servers first
-            if self.language_server_manager is not None:
-                log.info("Stopping existing language server manager ...")
-                self.language_server_manager.stop_all()
-                self.language_server_manager = None
-
-            log.info(f"Creating language server manager for {self.project_root}")
-            self._language_server_manager_init_error = None
-            ls_specific_settings = dict(self.serena_config.ls_specific_settings)
-            if self.project_config.ls_specific_settings:
-                if self.is_trusted():
-                    ls_specific_settings.update(self.project_config.ls_specific_settings)
+                tool_timeout = self.serena_config.tool_timeout
+                if tool_timeout is None or tool_timeout < 0:
+                    ls_timeout = None
                 else:
-                    log.warning(
-                        f"Project path {self.project_root} is not trusted, ignoring LS-specific settings from project configuration. "
-                        "To trust the project, modify the trusted path patterns in the global configuration."
-                    )
-            factory = LanguageServerFactory(
-                project_root=self.project_root,
-                project_config=self.project_config,
-                project_data_path=self._serena_data_folder,
-                encoding=self.project_config.encoding,
-                ignored_patterns=self._ignored_patterns,
-                ls_timeout=ls_timeout,
-                ls_specific_settings=ls_specific_settings,
-                trace_lsp_communication=self.serena_config.trace_lsp_communication,
-            )
-            self.language_server_manager = LanguageServerManager.from_languages(self.project_config.language_servers, factory, self)
-            return self.language_server_manager
-        except Exception as e:
-            self._language_server_manager_init_error = e
-            raise
+                    if tool_timeout < 10:
+                        raise ValueError(f"Tool timeout must be at least 10 seconds, but is {tool_timeout} seconds")
+                    ls_timeout = tool_timeout - 5
+
+                if self.language_server_manager is not None:
+                    log.info("Stopping existing language server manager ...")
+                    self.language_server_manager.stop_all()
+                    self.language_server_manager = None
+
+                log.info(f"Creating language server manager for {self.project_root}")
+                self._language_server_manager_init_error = None
+                ls_specific_settings = dict(self.serena_config.ls_specific_settings)
+                if self.project_config.ls_specific_settings:
+                    if self.is_trusted():
+                        ls_specific_settings.update(self.project_config.ls_specific_settings)
+                    else:
+                        log.warning(
+                            f"Project path {self.project_root} is not trusted, ignoring LS-specific settings from project configuration. "
+                            "To trust the project, modify the trusted path patterns in the global configuration."
+                        )
+
+                factory = LanguageServerFactory(
+                    project_root=self.project_root,
+                    project_config=self.project_config,
+                    project_data_path=self._serena_data_folder,
+                    encoding=self.project_config.encoding,
+                    ignored_patterns=self._ignored_patterns,
+                    ls_timeout=ls_timeout,
+                    ls_specific_settings=ls_specific_settings,
+                    trace_lsp_communication=self.serena_config.trace_lsp_communication,
+                )
+                manager = LanguageServerManager.from_languages(self.project_config.language_servers, factory, self)
+                self.language_server_manager = manager
+                return manager
+            except Exception as exc:
+                self._language_server_manager_init_error = exc
+                raise
 
     def get_language_server_manager_status(self) -> str:
         """
@@ -546,17 +575,23 @@ class Project(ToStringMixin):
             return "ready"
 
     def get_language_server_manager_or_raise(self) -> LanguageServerManager:
-        if self.language_server_manager is None:
-            msg = TextBuilder("The language server manager is not initialized, indicating a problem during project initialisation.")
-            if self._language_server_manager_init_error is not None:
-                msg.with_text(str(self._language_server_manager_init_error))
-            if self._agent is not None:
-                msg.with_text("For details, please check the logs. " + self._agent.get_log_inspection_instructions())
-            msg.with_text(
-                "IMPORTANT: Stop, do not attempt workarounds. Inform the user and wait for further instructions before you continue!"
-            )
-            raise Exception(msg.build())
-        return self.language_server_manager
+        """Return the manager, lazily creating it through the idempotent startup path."""
+        manager = self.language_server_manager
+        if manager is not None:
+            return manager
+
+        if self._language_server_manager_init_error is None:
+            try:
+                return self.ensure_language_server_manager()
+            except Exception:
+                pass
+
+        msg = TextBuilder("The language server manager could not be initialized.")
+        if self._language_server_manager_init_error is not None:
+            msg.with_text(str(self._language_server_manager_init_error))
+        if self._agent is not None:
+            msg.with_text("For details, please check the logs. " + self._agent.get_log_inspection_instructions())
+        raise Exception(msg.build())
 
     def add_language_server(self, ls_id: LanguageServerId) -> None:
         """
@@ -612,6 +647,16 @@ class Project(ToStringMixin):
             # Lazy import avoids project <-> symbol import cycles at module load.
             from serena.symbol import _v8_symbol_cache
 
+            _v8_symbol_cache.invalidate_project(self.project_root)
+        return num_changes
+
+    def ls_notify_file_changed(self, relative_path: str) -> int:
+        """Notify the active LSP manager about a file Serena explicitly changed."""
+        if not self.language_server_manager:
+            return 0
+        num_changes = self.language_server_manager.notify_file_system_change(relative_path)
+        if num_changes:
+            from serena.symbol import _v8_symbol_cache
             _v8_symbol_cache.invalidate_project(self.project_root)
         return num_changes
 

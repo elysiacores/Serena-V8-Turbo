@@ -500,6 +500,35 @@ Do not silently broaden a running workspace just because a new repository appear
 
 ## Benchmark it yourself
 
+### Current optimized baseline
+
+Measured on this repository with the project-local `.venv/bin/serena` (`8.0.0a1`) and correctness-gated MCP calls. Treat these as a reproducible local baseline, not universal hardware guarantees.
+
+| Workload | Startup | Cold / first call | Warm p50 | Warm p95 |
+|---|---:|---:|---:|---:|
+| `list_dir` (repo root) | 991.8 ms | — | 7.8 ms | 15.8 ms |
+| `find_symbol` | 978.0 ms | — | 3.3 ms | 6.1 ms |
+| `find_referencing_symbols` | 977.5 ms | — | 6.2 ms | 8.6 ms |
+| `search_for_pattern` (`src`) | 978.4 ms | — | 76.1 ms | 84.3 ms |
+| `get_symbols_overview` | 987.6 ms | — | 4.2 ms | 5.7 ms |
+| `get_diagnostics_for_file` | — | 1628.2 ms | 5.7 ms | 7.2 ms |
+| `ast_grep_search` | 976.5 ms | 26.5 ms | 26.3 ms | 41.3 ms |
+| `cgc_query` | 976.2 ms | 1447.8 ms | 3.2 ms | 3.7 ms |
+| `cgc_callers` | 1001.4 ms | 1510.5 ms | 3.3 ms | 4.4 ms |
+
+Freshness polling over 2,000 files measures **6.97 ms p50 / 7.13 ms p95** while still detecting same-size edits with preserved mtimes.
+
+The largest root-cause fixes behind this baseline are structural rather than timeout tuning:
+
+- one idempotent owner for project LSP startup; duplicate manager startup/restart races were removed;
+- Python/Jedi no longer pays SolidLSP's generic 2-second cross-file sleep because `jedi-language-server` resolves references synchronously;
+- language-server reverse lookup binds the already-selected implementation, reducing `get_ls_class()` resolution during Python/Jedi startup from 107 calls to 1 instead of importing unrelated language-server implementations;
+- optional usage telemetry runs off the MCP critical startup path, so a network request cannot block readiness;
+- CGC gateway processes share the MCP process group, are explicitly closed on graceful stdio shutdown, and no longer survive as orphan processes holding the embedded Kùzu database lock;
+- `v8_quick_bench.py` and `v8_warm_bench.py` delegate to the same correctness-gated suite, eliminating stale tool schemas and accidental benchmarking of a different Serena executable.
+
+CGC cold calls still include the upstream CodeGraphContext/Kùzu initialization floor; repeated identical queries are served by the workspace cache in a few milliseconds. RSS reported for CGC includes its child gateway/database process.
+
 ### One MCP workload
 
 ```bash

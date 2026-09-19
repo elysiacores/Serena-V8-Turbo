@@ -18,6 +18,20 @@ class SelectiveInvalidationTests(unittest.TestCase):
         self.assertIsNone(cache.get(key_a))
         self.assertEqual(cache.get(key_b), ["keep-b"])
 
+    def test_project_epoch_changes_cache_key_after_invalidation(self):
+        cache = _V8QueryCache()
+        project = "/tmp/workspace-epoch"
+        old_key = make_v8_cache_key("find", project, "Widget")
+        cache.put(old_key, ["old"])
+
+        cache.invalidate_project(project)
+
+        new_key = make_v8_cache_key("find", project, "Widget")
+        self.assertNotEqual(old_key, new_key)
+        self.assertIsNone(cache.get(old_key))
+        cache.put(new_key, ["new"])
+        self.assertEqual(cache.get(new_key), ["new"])
+
 
 if __name__ == "__main__":
     unittest.main()

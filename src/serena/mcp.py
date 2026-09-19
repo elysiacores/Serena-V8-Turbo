@@ -375,20 +375,24 @@ class SerenaMCPFactory:
                 config.language_backend = language_backend
 
             self.agent = self._create_serena_agent(config, modes=mode_selection_def, project_activation_error=project_activation_error)
-            # Prewarm the project's existing LanguageServerManager before MCP
-            # readiness. Serena's manager owns process reuse and restart logic;
-            # V8 must not create a second competing LSP supervisor.
+            # Project activation already owns eager LSP startup. Do not launch a
+            # second manager here: duplicate startup can race with activation and
+            # restart a manager that has just become ready. Explicit semantic
+            # prewarm is synchronous by design so opting in truly moves that cost
+            # into startup instead of competing with the first semantic request.
             agent_project = self.agent.get_active_project()
-            if agent_project is not None and agent_project.language_server_manager is None and os.environ.get("SERENA_V8_SKIP_PREWARM") != "1":
-                log.info("V8 prewarming language-server manager before MCP readiness")
-                agent_project.create_language_server_manager()
-            if agent_project is not None and agent_project.language_server_manager is not None and os.environ.get("SERENA_V8_SEMANTIC_PREWARM", "0") == "1":
+            if (
+                agent_project is not None
+                and os.environ.get("SERENA_V8_SKIP_PREWARM") != "1"
+                and os.environ.get("SERENA_V8_SEMANTIC_PREWARM", "0") == "1"
+            ):
                 try:
+                    manager = agent_project.get_language_server_manager_or_raise()
                     candidates = agent_project.gather_source_files()
-                    warmed = agent_project.language_server_manager.prewarm_semantic(candidates)
+                    warmed = manager.prewarm_semantic(candidates)
                     log.info("V8 semantic prewarm completed for %s", warmed or "no suitable source file")
                 except Exception:
-                    log.debug("V8 semantic prewarm unavailable", exc_info=True)
+                    log.warning("V8 semantic prewarm failed", exc_info=True)
 
         except Exception as e:
             show_fatal_exception_safe(e)
@@ -433,6 +437,12 @@ class SerenaMCPFactory:
                 log.info("MCP server shutting down")
                 if self.agent is not None:
                     self.agent.on_shutdown()
+                # Sidecars are process-owned resources too. Shut them down as
+                # part of the MCP lifecycle instead of relying only on atexit;
+                # signal-driven exits are covered by shared process-group ownership.
+                from serena_v8.sidecars import shutdown_sidecars
+
+                shutdown_sidecars()
             else:
                 log.info("Client disconnected")
 

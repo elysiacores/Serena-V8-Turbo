@@ -36,6 +36,11 @@ class JediServer(SolidLanguageServer):
     def is_ignored_dirname(self, dirname: str) -> bool:
         return super().is_ignored_dirname(dirname) or dirname in ["venv", "__pycache__"]
 
+    @override
+    def _get_wait_time_for_cross_file_referencing(self) -> float:
+        """Jedi resolves references synchronously, so no blind indexing delay is required."""
+        return 0.0
+
     def _create_base_initialize_params(self) -> dict:
         """
         Returns the initialize params for the Jedi Language Server.
@@ -149,7 +154,7 @@ class JediServer(SolidLanguageServer):
             return
 
         def check_experimental_status(params: dict) -> None:
-            if params["quiescent"] == True:
+            if params.get("quiescent") is True:
                 completions_available.set()
 
         def window_log_message(msg: dict) -> None:

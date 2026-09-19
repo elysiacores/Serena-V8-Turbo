@@ -109,16 +109,16 @@ def run_workload(
     return json.loads(completed.stdout)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None, *, default_rounds: int = 5) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", default=str(ROOT))
     parser.add_argument("--executable", required=True)
     parser.add_argument("--expected-version", required=True)
     parser.add_argument("--workloads", help="JSON workload list; defaults to Serena self-benchmarks")
-    parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("--rounds", type=int, default=default_rounds)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--output-dir", default=str(ROOT / "benchmarks" / "results"))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     workloads = load_workloads(args.workloads)
     stamp = time.strftime("%Y%m%d-%H%M%S")

@@ -7,6 +7,7 @@ the canonical Workspace path and stored outside the repository.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -24,6 +26,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 
 class SidecarKind(StrEnum):
@@ -129,32 +133,155 @@ class SidecarResult:
 Executor = Callable[..., tuple[int, str, str]]
 
 
+
+class _CgcGatewayClient:
+    """Persistent loopback client for CGC's native HTTP gateway."""
+
+    _startup_timeout = 8.0
+
+    def __init__(self, config: SidecarConfig) -> None:
+        self.config = config
+        self._lock = threading.RLock()
+        self._process: subprocess.Popen | None = None
+        self._port = 0
+        self._api_key = ""
+
+    @staticmethod
+    def _reserve_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
+    def _request(self, path: str, payload: dict[str, object] | None = None, *, timeout: float) -> dict[str, object]:
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        data = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(payload).encode("utf-8")
+        request = urllib_request.Request(
+            f"http://127.0.0.1:{self._port}{path}",
+            data=data,
+            headers=headers,
+            method="POST" if payload is not None else "GET",
+        )
+        with urllib_request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def start(self) -> None:
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                return
+            self.stop()
+            self._port = self._reserve_port()
+            self._api_key = uuid.uuid4().hex
+            command = [
+                self.config.cgc_bin,
+                "--database",
+                self.config.cgc_database,
+                "--path",
+                self.config.cgc_db_path,
+                "api",
+                "start",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(self._port),
+            ]
+            env = os.environ.copy()
+            # Force a private per-process token even when CGC has a user-level
+            # API key configured. This keeps the local gateway authenticated.
+            env["CGC_API_KEY"] = self._api_key
+            self._process = subprocess.Popen(
+                command,
+                cwd=self.config.workspace_root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+
+            deadline = time.monotonic() + self._startup_timeout
+            last_error: Exception | None = None
+            while time.monotonic() < deadline:
+                if self._process.poll() is not None:
+                    raise RuntimeError(f"CGC gateway exited with code {self._process.returncode}")
+                try:
+                    self._request("/health", timeout=0.25)
+                    return
+                except (OSError, TimeoutError, urllib_error.URLError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    time.sleep(0.05)
+            self.stop()
+            raise RuntimeError(f"CGC gateway did not become ready: {last_error}")
+
+    def call_tool(self, name: str, arguments: dict[str, object], *, timeout: float) -> object:
+        self.start()
+        response = self._request(
+            "/api/v1/tools/call",
+            {"name": name, "arguments": arguments},
+            timeout=timeout,
+        )
+        if response.get("status") != "ok":
+            raise RuntimeError(str(response.get("error") or "CGC gateway tool call failed"))
+        return response.get("data")
+
+    def stop(self) -> None:
+        with self._lock:
+            process = self._process
+            self._process = None
+            if process is None or process.poll() is not None:
+                return
+            try:
+                process.terminate()
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
+
+
 class SidecarRunner:
     """Run optional sidecars with fixed Workspace scope and bounded resources."""
 
     _query_cache: dict[tuple[str, tuple[str, ...]], tuple[float, SidecarResult]] = {}
+    _query_cache_sizes: dict[tuple[str, tuple[str, ...]], int] = {}
+    _query_cache_bytes = 0
     _query_cache_lock = threading.RLock()
     _cache_max_entries = 128
     _cache_max_bytes = 16 * 1024 * 1024
 
     @classmethod
     def _prune_query_cache(cls) -> None:
-        """Called under the cache lock; expiry is stored per entry, not per reader."""
+        """Expire and evict cached CGC queries without re-encoding every result."""
+        if not cls._query_cache:
+            cls._query_cache_sizes.clear()
+            cls._query_cache_bytes = 0
+            return
+
         now = time.monotonic()
         for key, (expires, _) in list(cls._query_cache.items()):
             if expires <= now:
-                cls._query_cache.pop(key)
-        sizes = {key: len(result.stdout.encode()) + len(result.stderr.encode())
-                 for key, (_, result) in cls._query_cache.items()}
-        total = sum(sizes.values())
-        while cls._query_cache and (len(cls._query_cache) > cls._cache_max_entries or total > cls._cache_max_bytes):
+                cls._query_cache.pop(key, None)
+                cls._query_cache_bytes -= cls._query_cache_sizes.pop(key, 0)
+
+        # Tests and explicit callers may clear _query_cache directly; reconcile
+        # accounting defensively without touching result payloads.
+        for key in list(cls._query_cache_sizes):
+            if key not in cls._query_cache:
+                cls._query_cache_bytes -= cls._query_cache_sizes.pop(key, 0)
+
+        while cls._query_cache and (
+            len(cls._query_cache) > cls._cache_max_entries
+            or cls._query_cache_bytes > cls._cache_max_bytes
+        ):
             key = next(iter(cls._query_cache))
-            total -= sizes[key]
-            cls._query_cache.pop(key)
+            cls._query_cache.pop(key, None)
+            cls._query_cache_bytes -= cls._query_cache_sizes.pop(key, 0)
+        cls._query_cache_bytes = max(0, cls._query_cache_bytes)
 
     def __init__(self, config: SidecarConfig, executor: Executor | None = None) -> None:
         self.config = config
         self._executor = executor or self._execute
+        self._gateway = _CgcGatewayClient(config) if executor is None else None
         self.last_command: tuple[str, ...] = ()
         self.last_cwd: str | None = None
 
@@ -164,6 +291,78 @@ class SidecarRunner:
         with cls._query_cache_lock:
             for key in [key for key in cls._query_cache if key[0] == root]:
                 cls._query_cache.pop(key, None)
+                cls._query_cache_bytes -= cls._query_cache_sizes.pop(key, 0)
+            cls._query_cache_bytes = max(0, cls._query_cache_bytes)
+
+    @classmethod
+    def _cached_result(cls, cache_key: tuple[str, tuple[str, ...]]) -> SidecarResult | None:
+        with cls._query_cache_lock:
+            cls._prune_query_cache()
+            cached = cls._query_cache.get(cache_key)
+            return cached[1] if cached is not None else None
+
+    @classmethod
+    def _store_cached_result(
+        cls,
+        cache_key: tuple[str, tuple[str, ...]],
+        result: SidecarResult,
+        ttl_ms: int,
+    ) -> None:
+        size = len(result.stdout.encode()) + len(result.stderr.encode())
+        with cls._query_cache_lock:
+            previous_size = cls._query_cache_sizes.get(cache_key, 0)
+            cls._query_cache_bytes -= previous_size
+            cls._query_cache[cache_key] = (time.monotonic() + ttl_ms / 1000, result)
+            cls._query_cache_sizes[cache_key] = size
+            cls._query_cache_bytes += size
+            cls._prune_query_cache()
+
+    def _run_cgc_gateway(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        *,
+        timeout_ms: int,
+    ) -> SidecarResult:
+        assert self._gateway is not None
+        command = ("cgc-gateway", tool_name, json.dumps(arguments, sort_keys=True, default=str))
+        self.last_command = command
+        self.last_cwd = self.config.workspace_root
+        cache_key = (str(Path(self.config.workspace_root).resolve()), command)
+        cached = self._cached_result(cache_key)
+        if cached is not None:
+            return cached
+
+        started = time.monotonic()
+        try:
+            payload = self._gateway.call_tool(tool_name, arguments, timeout=timeout_ms / 1000)
+            stdout = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+            result = SidecarResult(
+                SidecarKind.CGC,
+                SidecarStatus.OK,
+                self.config.workspace_root,
+                stdout=stdout[:self.config.max_output_bytes],
+                duration_ms=(time.monotonic() - started) * 1000,
+                timeout_ms=timeout_ms,
+            )
+        except TimeoutError as exc:
+            result = SidecarResult(
+                SidecarKind.CGC,
+                SidecarStatus.TIMEOUT,
+                self.config.workspace_root,
+                error=str(exc) or "CGC gateway request timed out",
+                duration_ms=(time.monotonic() - started) * 1000,
+                timeout_ms=timeout_ms,
+            )
+        except (OSError, urllib_error.URLError, RuntimeError, json.JSONDecodeError) as exc:
+            # Gateway is an optimization, not a correctness dependency. Stop a
+            # broken instance and fall back to the CLI path in the caller.
+            self._gateway.stop()
+            raise RuntimeError(str(exc)) from exc
+
+        if result.status == SidecarStatus.OK:
+            self._store_cached_result(cache_key, result, self.config.cgc_query_cache_ttl_ms)
+        return result
 
     def ast_grep_search(self, pattern: str, language: str, path: str = ".") -> SidecarResult:
         if not pattern.strip():
@@ -193,6 +392,10 @@ class SidecarRunner:
 
     def cgc_index(self, force: bool = False, path: str = ".", db_path: str | None = None) -> SidecarResult:
         target = self._safe_path(path)
+        if self._gateway is not None:
+            # KuzuDB is embedded. Do not keep a query gateway connection open
+            # while a separate index process mutates/promotes the same database.
+            self._gateway.stop()
         command = self._cgc_prefix(db_path) + ("index", str(target), "--no-progress")
         if force:
             command += ("--force",)
@@ -208,6 +411,15 @@ class SidecarRunner:
     def cgc_query(self, query: str) -> SidecarResult:
         if not query.strip():
             raise ValueError("query must not be empty")
+        if self._gateway is not None and not self.config.cgc_command:
+            try:
+                return self._run_cgc_gateway(
+                    "execute_cypher_query",
+                    {"cypher_query": query, "params": {}},
+                    timeout_ms=self.config.cgc_query_timeout_ms,
+                )
+            except RuntimeError:
+                pass
         if self.config.cgc_command:
             command = tuple(part.replace("{workspace_root}", self.config.workspace_root) for part in self.config.cgc_command) + (query,)
         else:
@@ -215,11 +427,36 @@ class SidecarRunner:
         return self._run(SidecarKind.CGC, command, timeout_ms=self.config.cgc_query_timeout_ms)
 
     def _cgc_relationship(self, operation: str, function: str, path: str | None) -> SidecarResult:
-        if not function.strip():
+        function = function.strip()
+        if not function:
             raise ValueError("function must not be empty")
-        command = self._cgc_prefix() + ("analyze", operation, function)
-        if path:
-            command += ("--file", str(self._safe_path(path)))
+
+        resolved_path = str(self._safe_path(path)) if path else None
+        # CGC 0.6.x resolves methods by terminal function name when a file
+        # context is supplied. Feeding "Class.method" returns a false negative.
+        target = function.rsplit(".", 1)[-1] if resolved_path and "." in function else function
+
+        if self._gateway is not None and not self.config.cgc_command:
+            query_type = "find_callers" if operation == "callers" else "find_callees"
+            arguments: dict[str, object] = {
+                "query_type": query_type,
+                "target": target,
+                "repo_path": self.config.workspace_root,
+            }
+            if resolved_path:
+                arguments["context"] = resolved_path
+            try:
+                return self._run_cgc_gateway(
+                    "analyze_code_relationships",
+                    arguments,
+                    timeout_ms=self.config.cgc_query_timeout_ms,
+                )
+            except RuntimeError:
+                pass
+
+        command = self._cgc_prefix() + ("analyze", operation, target)
+        if resolved_path:
+            command += ("--file", resolved_path)
         return self._run(SidecarKind.CGC, command, timeout_ms=self.config.cgc_query_timeout_ms)
 
     def _cgc_prefix(self, db_path: str | None = None) -> tuple[str, ...]:
@@ -238,20 +475,16 @@ class SidecarRunner:
         return resolved
 
     def _run(self, kind: SidecarKind, command: tuple[str, ...], timeout_ms: int | None = None) -> SidecarResult:
-        import time
-
         deadline_ms = timeout_ms or self.config.timeout_ms
         self.last_command = command
         self.last_cwd = self.config.workspace_root
         cacheable = kind == SidecarKind.CGC and len(command) > 5 and command[5] in {"query", "analyze"}
         cache_key = (str(Path(self.config.workspace_root).resolve()), command)
         if cacheable:
-            with self._query_cache_lock:
-                self._prune_query_cache()
-                cached = self._query_cache.get(cache_key)
-                if cached is not None:
-                    return cached[1]
-                self._query_cache.pop(cache_key, None)
+            cached = self._cached_result(cache_key)
+            if cached is not None:
+                return cached
+
         started = time.monotonic()
         try:
             returncode, stdout, stderr = self._executor(
@@ -276,9 +509,7 @@ class SidecarRunner:
             deadline_ms, metrics,
         )
         if cacheable and result.status == SidecarStatus.OK:
-            with self._query_cache_lock:
-                self._query_cache[cache_key] = (time.monotonic() + self.config.cgc_query_cache_ttl_ms / 1000, result)
-                self._prune_query_cache()
+            self._store_cached_result(cache_key, result, self.config.cgc_query_cache_ttl_ms)
         return result
 
     @staticmethod
@@ -357,6 +588,11 @@ class SidecarRunner:
             stdout_buffer.decode("utf-8", errors="replace"),
             stderr_buffer.decode("utf-8", errors="replace"),
         )
+
+    def shutdown(self) -> None:
+        """Release persistent sidecar resources owned by this runner."""
+        if self._gateway is not None:
+            self._gateway.stop()
 
 
 class WorkspaceCgcIndexer:
@@ -483,16 +719,50 @@ class WorkspaceCgcIndexer:
             shutil.rmtree(previous, ignore_errors=True)
 
 
+    _snapshot_ignored_dirs = frozenset({
+        ".git",
+        ".mypy_cache",
+        ".next",
+        ".next-build",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".serena",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "venv",
+    })
+    _snapshot_ignored_suffixes = frozenset({".pyc", ".pyo"})
+
+    @classmethod
+    def _snapshot_path_ignored(cls, relative_path: str) -> bool:
+        path = Path(relative_path)
+        return any(part in cls._snapshot_ignored_dirs for part in path.parts) or path.suffix.lower() in cls._snapshot_ignored_suffixes
+
     def _snapshot(self, target: str) -> dict[str, tuple[int, int, str]]:
         root = Path(self.runner.config.workspace_root)
         path = Path(target)
         files: list[Path] = []
         if path.is_file():
-            files = [path]
+            try:
+                relative = str(path.relative_to(root))
+            except ValueError:
+                relative = str(path)
+            if not self._snapshot_path_ignored(relative):
+                files = [path]
         elif path.is_dir():
             for current, dirs, names in os.walk(path, followlinks=False):
-                dirs[:] = [d for d in dirs if d not in {".git", "node_modules", ".next", ".next-build", "dist", "build"}]
-                files.extend(Path(current) / name for name in names)
+                dirs[:] = [d for d in dirs if d not in self._snapshot_ignored_dirs]
+                for name in names:
+                    file_path = Path(current) / name
+                    try:
+                        relative = str(file_path.relative_to(root))
+                    except ValueError:
+                        continue
+                    if not self._snapshot_path_ignored(relative):
+                        files.append(file_path)
         snapshot: dict[str, tuple[int, int, str]] = {}
         for file_path in files:
             try:
@@ -509,8 +779,9 @@ class WorkspaceCgcIndexer:
     def stale_paths(self) -> list[str]:
         with self._lock:
             snapshots = list(self._indexed_snapshots.items())
-            stale = set(self._dirty_paths)
+            stale = {path for path in self._dirty_paths if not self._snapshot_path_ignored(path)}
         for target, previous in snapshots:
+            previous = {path: value for path, value in previous.items() if not self._snapshot_path_ignored(path)}
             current = self._snapshot(target)
             stale.update(set(previous) ^ set(current))
             stale.update(path for path in set(previous) & set(current) if previous[path] != current[path])
@@ -550,6 +821,8 @@ class WorkspaceCgcIndexer:
 
 _indexers: dict[str, WorkspaceCgcIndexer] = {}
 _indexers_lock = threading.Lock()
+_runners: dict[str, SidecarRunner] = {}
+_runners_lock = threading.Lock()
 
 
 def indexer_for_workspace(workspace_root: str) -> WorkspaceCgcIndexer:
@@ -563,7 +836,33 @@ def indexer_for_workspace(workspace_root: str) -> WorkspaceCgcIndexer:
 
 
 def runner_for_workspace(workspace_root: str) -> SidecarRunner:
-    return SidecarRunner(SidecarConfig.from_environment(workspace_root))
+    root = str(Path(workspace_root).expanduser().resolve(strict=True))
+    with _runners_lock:
+        runner = _runners.get(root)
+        if runner is None:
+            runner = SidecarRunner(SidecarConfig.from_environment(root))
+            _runners[root] = runner
+        return runner
+
+
+def shutdown_sidecars() -> None:
+    with _indexers_lock:
+        indexers = list(_indexers.values())
+    for indexer in indexers:
+        try:
+            indexer.shutdown()
+        except Exception:
+            pass
+    with _runners_lock:
+        runners = list(_runners.values())
+    for runner in runners:
+        try:
+            runner.shutdown()
+        except Exception:
+            pass
+
+
+atexit.register(shutdown_sidecars)
 
 
 def result_json(result: SidecarResult) -> str:

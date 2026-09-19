@@ -9,13 +9,16 @@ Features:
 - Single-flight deduplication
 """
 
+import atexit
 import time
 import threading
 import json
+import heapq
+from collections import deque
 from enum import Enum
 from typing import Callable, Optional, Dict, Tuple
 from dataclasses import dataclass, field
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import uuid
 
@@ -43,8 +46,8 @@ class ScheduledRequest:
     started_at: float = 0.0
     finished_at: float = 0.0
     cancelled: bool = False
-    timer: Optional[threading.Timer] = None
     timeout_seconds: float = 0.0
+    deadline_at: float = 0.0
 
     @property
     def wait_time_ms(self) -> float:
@@ -139,15 +142,28 @@ class SmartScheduler:
     
     def __init__(self, lane_configs: Optional[Dict] = None):
         self._configs = lane_configs or LANE_CONFIGS
-        self._lanes: Dict[Lane, list] = {lane: [] for lane in Lane}
+        self._lanes: Dict[Lane, deque[ScheduledRequest]] = {lane: deque() for lane in Lane}
         self._active: Dict[Lane, int] = {lane: 0 for lane in Lane}
-        # Dispatch and completion can recursively dispatch the next request.
         self._lock = threading.RLock()
-        self._condition = threading.Condition(self._lock)
-        
+        self._deadline_condition = threading.Condition(self._lock)
+        self._deadlines: list[tuple[float, int, ScheduledRequest]] = []
+        self._deadline_seq = 0
+        self._shutdown = False
+
         # Single-flight deduplication
         self._in_flight: Dict[str, Future] = {}
-        
+
+        # A bounded shared pool removes per-request thread creation while lane
+        # limits still enforce semantic/read/write concurrency.
+        max_workers = max(1, sum(config.max_concurrent for config in self._configs.values()))
+        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="serena-v8-scheduler")
+        self._deadline_thread = threading.Thread(
+            target=self._deadline_loop,
+            name="serena-v8-deadlines",
+            daemon=True,
+        )
+        self._deadline_thread.start()
+
         # Metrics
         self._total_dispatched = 0
         self._total_cancelled = 0
@@ -167,38 +183,55 @@ class SmartScheduler:
         # Normalize args for comparison
         normalized = json.dumps(args, sort_keys=True, default=str)
         return f"{project}:{tool}:{normalized}"
+
+    def _remove_in_flight(self, request: ScheduledRequest) -> None:
+        key = self._single_flight_key(request.tool, request.args, request.project)
+        if self._in_flight.get(key) is request.future:
+            self._in_flight.pop(key, None)
+
+    def _deadline_loop(self) -> None:
+        """Manage all request deadlines with one daemon thread."""
+        while True:
+            with self._deadline_condition:
+                while not self._shutdown:
+                    while self._deadlines and self._deadlines[0][2].future.done():
+                        heapq.heappop(self._deadlines)
+                    if not self._deadlines:
+                        self._deadline_condition.wait()
+                        continue
+                    deadline_at, _, request = self._deadlines[0]
+                    delay = deadline_at - time.perf_counter()
+                    if delay > 0:
+                        self._deadline_condition.wait(timeout=delay)
+                        continue
+                    heapq.heappop(self._deadlines)
+                    self._timeout_request_locked(request)
+                    break
+                if self._shutdown:
+                    return
     
     def submit(self, tool: str, args: dict, project: str,
                fn: Callable, timeout: float = 0) -> Tuple[Future, str]:
-        """
-        Submit a request to the scheduler.
-        
-        Returns (Future, request_id).
-        If a matching request is already in-flight, returns that future instead.
-        """
+        """Submit a request and return its future plus request id."""
         lane = self.classify(tool)
         config = self._configs[lane]
         timeout = timeout or config.timeout
-        
-        # Single-flight check
+
         with self._lock:
-            # Single-flight is safe for idempotent reads only. Never merge
-            # mutations: identical write requests may be intentional retries.
             key = self._single_flight_key(tool, args, project)
             if lane != Lane.WRITE_REFACTOR and key in self._in_flight:
                 existing = self._in_flight[key]
                 if not existing.done():
                     log.info(f"Single-flight: deduplicating {tool}")
                     return existing, f"dedup:{key}"
-            
-            # Queue depth check
+
             if len(self._lanes[lane]) >= config.max_queue:
                 self._total_rejected += 1
                 raise QueueFullError(f"Lane {lane.value} queue full ({config.max_queue})")
-            
-            # Create request
+
             request_id = str(uuid.uuid4())[:12]
             future = Future()
+            created_at = time.perf_counter()
             request = ScheduledRequest(
                 id=request_id,
                 lane=lane,
@@ -207,72 +240,69 @@ class SmartScheduler:
                 project=project,
                 future=future,
                 fn=fn,
+                created_at=created_at,
                 timeout_seconds=timeout,
+                deadline_at=created_at + timeout,
             )
-            # Keep timing metadata on the Future so the central dispatcher can
-            # report queue/execution stages without a second request registry.
             setattr(future, "_serena_v8_request", request)
-
-            # Register for single-flight
             self._in_flight[key] = future
-            
-            # Add to queue
             self._lanes[lane].append(request)
-            timer = threading.Timer(timeout, self._timeout_request, args=(request,))
-            request.timer = timer
-            timer.daemon = True
-            timer.start()
-            
-            # Dispatch if capacity available
+
+            self._deadline_seq += 1
+            heapq.heappush(self._deadlines, (request.deadline_at, self._deadline_seq, request))
+            self._deadline_condition.notify()
             self._try_dispatch(lane)
-            
             return future, request_id
 
     def _timeout_request(self, request: ScheduledRequest):
-        """Expire queued work/read waiters; never pretend a running write stopped."""
+        """Expire queued/read work; never pretend a running mutation stopped."""
         with self._lock:
-            if request.future.done():
-                return
-            if request.lane == Lane.WRITE_REFACTOR and request.future.running():
-                return
-            request.cancelled = True
-            self._total_timeout += 1
-            request.future.set_exception(TimeoutError(
-                f"{request.tool} exceeded {request.timeout_seconds}s deadline"
-            ))
+            self._timeout_request_locked(request)
+
+    def _timeout_request_locked(self, request: ScheduledRequest) -> None:
+        if request.future.done():
+            return
+        if request.lane == Lane.WRITE_REFACTOR and request.future.running():
+            return
+
+        request.cancelled = True
+        self._total_timeout += 1
+        self._remove_in_flight(request)
+        if not request.future.running():
+            try:
+                self._lanes[request.lane].remove(request)
+            except ValueError:
+                pass
+        request.future.set_exception(
+            TimeoutError(f"{request.tool} exceeded {request.timeout_seconds}s deadline")
+        )
+        self._try_dispatch(request.lane)
     
     def _try_dispatch(self, lane: Lane):
         """Try to dispatch queued requests in a lane."""
         with self._lock:
             config = self._configs[lane]
             queue = self._lanes[lane]
-            
+
             while queue and self._active[lane] < config.max_concurrent:
-                # Writes exclude every lane, not just other writes. Once a
-                # writer queues, let existing reads drain before admitting more.
                 if lane == Lane.WRITE_REFACTOR:
                     if any(self._active.values()):
                         break
                 elif self._active[Lane.WRITE_REFACTOR] or self._lanes[Lane.WRITE_REFACTOR]:
                     break
-                request = queue.pop(0)
-                
-                if request.cancelled or not request.future.set_running_or_notify_cancel():
+
+                request = queue.popleft()
+                if request.cancelled or request.future.done() or not request.future.set_running_or_notify_cancel():
+                    self._remove_in_flight(request)
                     continue
-                
+
                 self._active[lane] += 1
                 self._total_dispatched += 1
                 request.started_at = time.perf_counter()
-                
-                # Execute in background
-                threading.Thread(
-                    target=self._execute,
-                    args=(request,),
-                    daemon=True,
-                ).start()
+                self._executor.submit(self._execute, request)
     
     def _execute(self, request: ScheduledRequest):
-        """Execute a scheduled request."""
+        """Execute one scheduled request inside the shared worker pool."""
         result = None
         error = None
         try:
@@ -284,31 +314,39 @@ class SmartScheduler:
         finally:
             request.finished_at = time.perf_counter()
             with self._lock:
-                if request.timer is not None:
-                    request.timer.cancel()
-                    request.timer = None
                 self._active[request.lane] -= 1
-                key = self._single_flight_key(request.tool, request.args, request.project)
-                if key in self._in_flight and self._in_flight[key] is request.future:
-                    del self._in_flight[key]
+                self._remove_in_flight(request)
+                self._deadline_condition.notify()
                 for lane in (Lane.WRITE_REFACTOR, Lane.FAST_READ, Lane.SEMANTIC_READ):
                     self._try_dispatch(lane)
-        # Publish completion after the lane accounting is consistent.
+
         if not request.cancelled and not request.future.done():
             if error is not None:
                 request.future.set_exception(error)
             else:
                 request.future.set_result(result)
+            with self._deadline_condition:
+                self._deadline_condition.notify()
     
     def cancel(self, request_id: str) -> bool:
-        """Cancel a request by ID."""
+        """Cancel a queued request by ID."""
         with self._lock:
             for lane, queue in self._lanes.items():
-                for request in queue:
-                    if request.id == request_id:
-                        request.cancel()
-                        self._total_cancelled += 1
-                        return True
+                for request in tuple(queue):
+                    if request.id != request_id:
+                        continue
+                    if request.future.running():
+                        return False
+                    request.cancel()
+                    try:
+                        queue.remove(request)
+                    except ValueError:
+                        pass
+                    self._remove_in_flight(request)
+                    self._total_cancelled += 1
+                    self._deadline_condition.notify()
+                    self._try_dispatch(lane)
+                    return True
         return False
     
     @property
@@ -322,15 +360,29 @@ class SmartScheduler:
             return {lane.value: count for lane, count in self._active.items()}
     
     def stats(self) -> dict:
-        return {
-            "dispatched": self._total_dispatched,
-            "cancelled": self._total_cancelled,
-            "timeout": self._total_timeout,
-            "rejected": self._total_rejected,
-            "queue_depth": self.queue_depth,
-            "active": self.active_count,
-            "in_flight": len(self._in_flight),
-        }
+        with self._lock:
+            pending_deadlines = sum(1 for _, _, request in self._deadlines if not request.future.done())
+            return {
+                "dispatched": self._total_dispatched,
+                "cancelled": self._total_cancelled,
+                "timeout": self._total_timeout,
+                "rejected": self._total_rejected,
+                "queue_depth": {lane.value: len(queue) for lane, queue in self._lanes.items()},
+                "active": {lane.value: count for lane, count in self._active.items()},
+                "in_flight": len(self._in_flight),
+                "pending_deadlines": pending_deadlines,
+            }
+
+    def shutdown(self, wait: bool = False) -> None:
+        """Stop scheduler housekeeping and release worker-pool resources."""
+        with self._deadline_condition:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            self._deadline_condition.notify_all()
+        if self._deadline_thread is not threading.current_thread():
+            self._deadline_thread.join(timeout=1.0)
+        self._executor.shutdown(wait=wait, cancel_futures=not wait)
 
 
 class QueueFullError(Exception):
@@ -389,3 +441,15 @@ def get_scheduler() -> SmartScheduler:
         if _scheduler is None:
             _scheduler = SmartScheduler()
         return _scheduler
+
+
+def _shutdown_scheduler() -> None:
+    scheduler = _scheduler
+    if scheduler is not None:
+        try:
+            scheduler.shutdown(wait=False)
+        except Exception:
+            pass
+
+
+atexit.register(_shutdown_scheduler)
