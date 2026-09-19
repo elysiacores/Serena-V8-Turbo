@@ -118,7 +118,17 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(result.status, SidecarStatus.OK)
             self.assertIn(str(Path(root).resolve()), runner.last_command)
 
-    def test_cgc_metrics_are_extracted_from_index_output(self):
+    def test_cgc_query_cache_reuses_successful_workspace_query(self):
+        with tempfile.TemporaryDirectory() as root:
+            calls = []
+            config = SidecarConfig.from_environment(root, environ={"SERENA_V8_CGC_QUERY_CACHE_TTL_MS": "5000"})
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (calls.append(command) or (0, "graph", "")))
+            first = runner.cgc_callers("leaf")
+            second = runner.cgc_callers("leaf")
+            self.assertEqual(first.status, SidecarStatus.OK)
+            self.assertEqual(second.status, SidecarStatus.OK)
+            self.assertEqual(len(calls), 1)
+
         with tempfile.TemporaryDirectory() as root:
             config = SidecarConfig.from_environment(root, environ={})
             runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "Total scanned files | 4\nFunction nodes | 9\nCALLS edges | 12\n", ""))

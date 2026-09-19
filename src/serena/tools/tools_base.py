@@ -429,12 +429,16 @@ class Tool(Component):
             if log_call:
                 log.info(f"Result: {result}")
 
-            try:
-                ls_manager = self.agent.get_language_server_manager()
-                if ls_manager is not None:
-                    ls_manager.save_all_caches()
-            except Exception as e:
-                log.error(f"Error saving language server cache: {e}")
+            # Read-only tools must not persist every LSP cache after each call;
+            # cache persistence is reserved for mutations to avoid a multi-second
+            # disk/serialization penalty on lightweight navigation and reads.
+            if not self.is_readonly():
+                try:
+                    ls_manager = self.agent.get_language_server_manager()
+                    if ls_manager is not None:
+                        ls_manager.save_all_caches()
+                except Exception as e:
+                    log.error(f"Error saving language server cache: {e}")
 
             return result
 

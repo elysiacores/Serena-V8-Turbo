@@ -16,6 +16,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ class SidecarConfig:
     cgc_query_timeout_ms: int = 5000
     cgc_incremental_index_timeout_ms: int = 10000
     cgc_full_index_timeout_ms: int = 120000
+    cgc_query_cache_ttl_ms: int = 5000
     max_output_bytes: int = 5 * 1024 * 1024
 
     @classmethod
@@ -72,6 +74,7 @@ class SidecarConfig:
             "SERENA_V8_CGC_INCREMENTAL_INDEX_TIMEOUT_MS", "CGC_INCREMENTAL_INDEX_TIMEOUT_MS", 10_000
         )
         full_timeout_ms = timeout_value("SERENA_V8_CGC_FULL_INDEX_TIMEOUT_MS", "CGC_FULL_INDEX_TIMEOUT_MS", 120_000)
+        query_cache_ttl_ms = timeout_value("SERENA_V8_CGC_QUERY_CACHE_TTL_MS", "CGC_QUERY_CACHE_TTL_MS", 5_000)
         try:
             max_output = int(env.get("SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES", str(5 * 1024 * 1024)))
         except ValueError as exc:
@@ -91,6 +94,7 @@ class SidecarConfig:
             cgc_query_timeout_ms=query_timeout_ms,
             cgc_incremental_index_timeout_ms=incremental_timeout_ms,
             cgc_full_index_timeout_ms=full_timeout_ms,
+            cgc_query_cache_ttl_ms=query_cache_ttl_ms,
             max_output_bytes=max_output,
         )
 
@@ -127,11 +131,21 @@ Executor = Callable[..., tuple[int, str, str]]
 class SidecarRunner:
     """Run optional sidecars with fixed Workspace scope and bounded resources."""
 
+    _query_cache: dict[tuple[str, tuple[str, ...]], tuple[float, SidecarResult]] = {}
+    _query_cache_lock = threading.RLock()
+
     def __init__(self, config: SidecarConfig, executor: Executor | None = None) -> None:
         self.config = config
         self._executor = executor or self._execute
         self.last_command: tuple[str, ...] = ()
         self.last_cwd: str | None = None
+
+    @classmethod
+    def invalidate_query_cache(cls, workspace_root: str) -> None:
+        root = str(Path(workspace_root).resolve())
+        with cls._query_cache_lock:
+            for key in [key for key in cls._query_cache if key[0] == root]:
+                cls._query_cache.pop(key, None)
 
     def ast_grep_search(self, pattern: str, language: str, path: str = ".") -> SidecarResult:
         if not pattern.strip():
@@ -211,6 +225,14 @@ class SidecarRunner:
         deadline_ms = timeout_ms or self.config.timeout_ms
         self.last_command = command
         self.last_cwd = self.config.workspace_root
+        cacheable = kind == SidecarKind.CGC and len(command) > 5 and command[5] in {"query", "analyze"}
+        cache_key = (str(Path(self.config.workspace_root).resolve()), command)
+        if cacheable:
+            with self._query_cache_lock:
+                cached = self._query_cache.get(cache_key)
+                if cached is not None and (time.monotonic() - cached[0]) * 1000 < self.config.cgc_query_cache_ttl_ms:
+                    return cached[1]
+                self._query_cache.pop(cache_key, None)
         started = time.monotonic()
         try:
             returncode, stdout, stderr = self._executor(
@@ -229,11 +251,15 @@ class SidecarRunner:
             status = SidecarStatus.OK if returncode == 0 else SidecarStatus.FAILED
             error = "" if returncode == 0 else f"sidecar exited with code {returncode}"
         metrics = self._parse_cgc_metrics(stdout) if kind == SidecarKind.CGC else {}
-        return SidecarResult(
+        result = SidecarResult(
             kind, status, self.config.workspace_root, stdout[:self.config.max_output_bytes],
             stderr[:self.config.max_output_bytes], error, (time.monotonic() - started) * 1000,
             deadline_ms, metrics,
         )
+        if cacheable and result.status == SidecarStatus.OK:
+            with self._query_cache_lock:
+                self._query_cache[cache_key] = (time.monotonic(), result)
+        return result
 
     @staticmethod
     def _parse_cgc_metrics(stdout: str) -> dict[str, int | float]:
@@ -317,6 +343,8 @@ class WorkspaceCgcIndexer:
                 SidecarKind.CGC, SidecarStatus.FAILED, self.runner.config.workspace_root,
                 error=f"CGC index promotion failed: {exc}", timeout_ms=self.runner.config.cgc_full_index_timeout_ms,
             )
+        if result.status == SidecarStatus.OK:
+            SidecarRunner.invalidate_query_cache(self.runner.config.workspace_root)
         with self._lock:
             self._job_meta[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
             self._job_meta[job_id]["duration_ms"] = round(result.duration_ms, 3)

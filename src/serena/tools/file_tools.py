@@ -141,18 +141,29 @@ class FindFileTool(Tool):
     Finds files in the given relative paths
     """
 
-    def apply(self, file_mask: str, relative_path: str) -> str:
+    def apply(
+        self,
+        file_mask: str,
+        relative_path: str,
+        skip_ignored_files: bool = True,
+        max_results: int = 1000,
+        max_answer_chars: int = 20000,
+    ) -> str:
         """
         Finds files matching the given file mask within the given relative path
 
         :param file_mask: the filename or file mask (using the wildcards * or ?) to search for
         :param relative_path: the relative path to the directory to search in; pass "." to scan the project root
-        :param skip_ignored_files: whether to skip ignored files/directories
-        :return: a JSON object with the list of matching files
+        :param skip_ignored_files: whether to skip dependency/build/generated paths
+        :param max_results: maximum number of matching paths to return
+        :param max_answer_chars: maximum serialized response size
+        :return: a bounded JSON object with matching files and truncation metadata
         """
         self.project.validate_relative_path(relative_path)
-
-        is_ignored_path_fn = self.project.get_is_ignored_path_fn(relative_path, skip_ignored_paths=False)
+        max_results = max(1, min(max_results, 10000))
+        is_ignored_path_fn = self.project.get_is_ignored_path_fn(
+            relative_path, skip_ignored_paths=skip_ignored_files
+        )
         dir_to_scan = os.path.join(self.get_project_root(), relative_path)
 
         # find the files by ignoring everything that doesn't match
@@ -170,8 +181,14 @@ class FindFileTool(Tool):
             relative_to=self.get_project_root(),
         )
 
-        result = self._to_json({"files": files})
-        return result
+        result_files = files[:max_results]
+        result = self._to_json({
+            "files": result_files,
+            "returned_count": len(result_files),
+            "total_count": len(files),
+            "truncated": len(files) > len(result_files),
+        })
+        return self._limit_length(result, max_answer_chars)
 
 
 class ReplaceContentTool(EditingToolWithDiagnostics):
