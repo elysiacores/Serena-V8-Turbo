@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -163,7 +164,25 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(indexer.status(job_id)["job_id"], job_id)
             indexer.shutdown()
 
-    def test_full_then_incremental_keeps_workspace_snapshot(self):
+    def test_unchanged_incremental_index_is_skipped(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "sample.py"
+            path.write_text("def value():\n    return 1\n")
+            calls = []
+            config = SidecarConfig.from_environment(root, environ={})
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (calls.append(command) or (0, "indexed", "")))
+            indexer = WorkspaceCgcIndexer(runner)
+            first = indexer.wait(indexer.submit(path="sample.py"), timeout=2)
+            self.assertEqual(first["state"], "completed")
+            started = time.perf_counter()
+            second = indexer.wait(indexer.submit(path="sample.py"), timeout=2)
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            self.assertEqual(second["state"], "skipped")
+            self.assertEqual(second["result"]["metrics"]["skipped"], 1)
+            self.assertLess(elapsed_ms, 100)
+            self.assertEqual(len(calls), 1)
+            indexer.shutdown()
+
         with tempfile.TemporaryDirectory() as root:
             first = Path(root) / "first.py"
             second = Path(root) / "second.py"

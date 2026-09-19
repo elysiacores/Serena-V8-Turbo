@@ -304,21 +304,38 @@ class WorkspaceCgcIndexer:
         self.runner = runner
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="serena-v8-cgc")
         self._jobs: dict[str, Future[SidecarResult]] = {}
-        self._indexed_snapshots: dict[str, dict[str, tuple[int, int]]] = {}
+        self._indexed_snapshots: dict[str, dict[str, tuple[int, int, str]]] = {}
         self._job_paths: dict[str, str] = {}
         self._job_meta: dict[str, dict[str, object]] = {}
         self._lock = threading.RLock()
 
     def submit(self, *, path: str = ".", force: bool = False) -> str:
-        self.runner._safe_path(path)
         job_id = uuid.uuid4().hex
         with self._lock:
-            self._job_paths[job_id] = str(self.runner._safe_path(path))
+            target = str(self.runner._safe_path(path))
+            self._job_paths[job_id] = target
             self._job_meta[job_id] = {"submitted_at": datetime.now(timezone.utc).isoformat()}
-            future = self._executor.submit(self._run_job, job_id, force, path)
+            if not force and self._is_unchanged(target):
+                future: Future[SidecarResult] = Future()
+                future.set_result(SidecarResult(
+                    SidecarKind.CGC,
+                    SidecarStatus.OK,
+                    self.runner.config.workspace_root,
+                    stdout="unchanged; index skipped",
+                    metrics={"skipped": 1},
+                ))
+                self._job_meta[job_id]["state"] = "skipped"
+                self._job_meta[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+                self._job_meta[job_id]["duration_ms"] = 0.0
+            else:
+                future = self._executor.submit(self._run_job, job_id, force, path)
             self._jobs[job_id] = future
             future.add_done_callback(lambda done: self._record_snapshot(job_id, done))
         return job_id
+
+    def _is_unchanged(self, target: str) -> bool:
+        previous = self._indexed_snapshots.get(target)
+        return bool(previous) and previous == self._snapshot(target)
 
     def _run_job(self, job_id: str, force: bool, path: str) -> SidecarResult:
         with self._lock:
@@ -380,7 +397,7 @@ class WorkspaceCgcIndexer:
                 target = self._job_paths[job_id]
                 self._indexed_snapshots[target] = self._snapshot(target)
 
-    def _snapshot(self, target: str) -> dict[str, tuple[int, int]]:
+    def _snapshot(self, target: str) -> dict[str, tuple[int, int, str]]:
         root = Path(self.runner.config.workspace_root)
         path = Path(target)
         files: list[Path] = []
@@ -390,13 +407,17 @@ class WorkspaceCgcIndexer:
             for current, dirs, names in os.walk(path, followlinks=False):
                 dirs[:] = [d for d in dirs if d not in {".git", "node_modules", ".next", ".next-build", "dist", "build"}]
                 files.extend(Path(current) / name for name in names)
-        snapshot: dict[str, tuple[int, int]] = {}
+        snapshot: dict[str, tuple[int, int, str]] = {}
         for file_path in files:
             try:
                 stat = file_path.stat()
+                digest = hashlib.blake2b(digest_size=8)
+                with file_path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
             except OSError:
                 continue
-            snapshot[str(file_path.relative_to(root))] = (stat.st_mtime_ns, stat.st_size)
+            snapshot[str(file_path.relative_to(root))] = (stat.st_mtime_ns, stat.st_size, digest.hexdigest())
         return snapshot
 
     def stale_paths(self) -> list[str]:
@@ -419,9 +440,10 @@ class WorkspaceCgcIndexer:
             state = "running" if future.running() else "queued"
             return {"job_id": job_id, "state": state, "workspace_root": self.runner.config.workspace_root, **metadata}
         result = future.result()
+        state = metadata.get("state") or ("completed" if result.status == SidecarStatus.OK else "failed")
         return {
             "job_id": job_id,
-            "state": "completed" if result.status == SidecarStatus.OK else "failed",
+            "state": state,
             "workspace_root": self.runner.config.workspace_root,
             **metadata,
             "result": result.to_dict(),

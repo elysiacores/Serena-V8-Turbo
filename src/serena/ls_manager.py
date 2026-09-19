@@ -180,6 +180,34 @@ class LanguageServerManager:
             ls = self._default_language_server
         return self._ensure_functional_ls(ls)
 
+    def prewarm_semantic(self, relative_paths: list[str]) -> str | None:
+        """Open one source file and drain the LS semantic warmup path before MCP readiness."""
+        warmed: list[str] = []
+        warmed_languages: set[str] = set()
+        for relative_path in relative_paths[:256]:
+            try:
+                ls = self.get_language_server(relative_path)
+                language_key = str(getattr(ls, "ls_id", type(ls).__name__))
+                if language_key in warmed_languages:
+                    continue
+                pre_open = getattr(ls, "_pre_open_for_cross_file_references", None)
+                wait_ready = getattr(ls, "_wait_for_cross_file_references_if_needed", None)
+                if not callable(pre_open) or not callable(wait_ready):
+                    continue
+                pre_open()
+                with ls.open_file(relative_path):
+                    wait_ready()
+                    request_symbols = getattr(ls, "request_document_symbols", None)
+                    if callable(request_symbols):
+                        request_symbols(relative_path)
+                warmed_languages.add(language_key)
+                warmed.append(relative_path)
+                if len(warmed_languages) >= len(self._language_servers):
+                    break
+            except Exception:
+                log.debug("Semantic prewarm skipped for %s", relative_path, exc_info=True)
+        return ",".join(warmed) or None
+
     def _create_and_start_language_server(self, ls_id: LanguageServerId) -> SolidLanguageServer:
         if self._language_server_factory is None:
             raise ValueError(f"No language server factory available to create language server for {ls_id}")

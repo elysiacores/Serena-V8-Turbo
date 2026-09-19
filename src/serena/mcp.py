@@ -382,6 +382,13 @@ class SerenaMCPFactory:
             if agent_project is not None and agent_project.language_server_manager is None and os.environ.get("SERENA_V8_SKIP_PREWARM") != "1":
                 log.info("V8 prewarming language-server manager before MCP readiness")
                 agent_project.create_language_server_manager()
+            if agent_project is not None and agent_project.language_server_manager is not None and os.environ.get("SERENA_V8_SEMANTIC_PREWARM", "1") != "0":
+                try:
+                    candidates = agent_project.gather_source_files()
+                    warmed = agent_project.language_server_manager.prewarm_semantic(candidates)
+                    log.info("V8 semantic prewarm completed for %s", warmed or "no suitable source file")
+                except Exception:
+                    log.debug("V8 semantic prewarm unavailable", exc_info=True)
 
         except Exception as e:
             show_fatal_exception_safe(e)
