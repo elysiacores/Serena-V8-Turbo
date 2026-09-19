@@ -8,27 +8,37 @@ class AstGrepSearchTool(Tool, ToolMarkerOptional, ToolMarkerSymbolicRead):
     """Search the active Workspace structurally with optional ast-grep."""
 
     def apply(self, pattern: str, language: str, path: str = ".") -> str:
-        """
-        Run a read-only structural search inside the active Workspace.
+        """Run a read-only structural search inside the active Workspace."""
+        return result_json(runner_for_workspace(self.project.project_root).ast_grep_search(pattern, language, path))
 
-        :param pattern: ast-grep pattern, for example ``$FUNC($ARG)``
-        :param language: source language understood by ast-grep
-        :param path: Workspace-relative directory or file to search
-        :return: JSON result with status, output, and bounded timing metadata
-        """
-        result = runner_for_workspace(self.project.project_root).ast_grep_search(pattern, language, path)
-        return result_json(result)
+
+class CgcIndexTool(Tool, ToolMarkerOptional):
+    """Build or refresh the isolated CGC graph for the active Workspace."""
+
+    def apply(self, force: bool = False, path: str = ".") -> str:
+        """Index a Workspace-relative path into its external CGC database."""
+        return result_json(runner_for_workspace(self.project.project_root).cgc_index(force, path))
+
+
+class CgcCallersTool(Tool, ToolMarkerOptional, ToolMarkerSymbolicRead):
+    """Find callers of a function using the CGC graph sidecar."""
+
+    def apply(self, function: str, path: str | None = None) -> str:
+        """Return CGC callers; this is separate from Serena/LSP references."""
+        return result_json(runner_for_workspace(self.project.project_root).cgc_callers(function, path))
+
+
+class CgcCalleesTool(Tool, ToolMarkerOptional, ToolMarkerSymbolicRead):
+    """Find callees of a function using the CGC graph sidecar."""
+
+    def apply(self, function: str, path: str | None = None) -> str:
+        """Return CGC callees; this is separate from Serena/LSP references."""
+        return result_json(runner_for_workspace(self.project.project_root).cgc_callees(function, path))
 
 
 class CgcQueryTool(Tool, ToolMarkerOptional, ToolMarkerSymbolicRead):
     """Query the optional read-only CGC graph sidecar for the active Workspace."""
 
     def apply(self, query: str) -> str:
-        """
-        Run a read-only graph query using the configured CGC command.
-
-        :param query: sidecar-specific graph query string
-        :return: JSON result with status, output, and bounded timing metadata
-        """
-        result = runner_for_workspace(self.project.project_root).cgc_query(query)
-        return result_json(result)
+        """Run a read-only Cypher query against the active Workspace graph."""
+        return result_json(runner_for_workspace(self.project.project_root).cgc_query(query))

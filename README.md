@@ -267,18 +267,20 @@ Configure the optional MCP tools per installation:
 
 ```bash
 export SERENA_V8_AST_GREP_BIN="ast-grep"
-export SERENA_V8_SIDECAR_TIMEOUT_MS="5000"
+export SERENA_V8_CGC_BIN="cgc"
+export SERENA_V8_CGC_DATABASE="kuzudb"
+export SERENA_V8_CGC_DB_ROOT="$HOME/.serena-v8/cgc"
+export SERENA_V8_SIDECAR_TIMEOUT_MS="30000"
 export SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES="5242880"
-# CGC is intentionally an explicit command template supplied by the user:
-export SERENA_V8_CGC_COMMAND="cgc query --project {workspace_root}"
+# Optional custom CGC query command; {workspace_root} is replaced safely:
+# export SERENA_V8_CGC_COMMAND="cgc --database kuzudb --path {workspace_root} query"
 ```
 
-The optional tools are `ast_grep_search` and `cgc_query`. CGC command syntax is
-not assumed by V8 because deployments may expose different CGC CLIs. Do not put
-real Workspace paths, credentials, or project-specific configuration in the
-repository. Sidecars must remain read-only until a future mutation workflow
-proves diff review, rollback, cache invalidation, LSP synchronization, and
-post-edit diagnostics.
+The optional tools are `ast_grep_search`, `cgc_index`, `cgc_callers`,
+`cgc_callees`, and `cgc_query`. Run `cgc_index` once for a Workspace before
+calling the relationship tools. CGC databases are stored outside the
+repository, under a hash derived from the canonical Workspace path. This keeps
+graph state isolated and prevents cross-Workspace mixing.
 
 ## 📊 Monitoring
 

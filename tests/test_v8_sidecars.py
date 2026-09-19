@@ -65,7 +65,22 @@ class SidecarRunnerTests(unittest.TestCase):
             self.assertEqual(result.status, SidecarStatus.TIMEOUT)
             self.assertEqual(result.timeout_ms, 250)
 
-    def test_cgc_command_receives_canonical_workspace(self):
+    def test_cgc_commands_are_workspace_scoped(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = SidecarConfig.from_environment(root, environ={"SERENA_V8_CGC_BIN": "cgc-test"})
+            runner = SidecarRunner(config, executor=lambda command, **kwargs: (0, "graph\n", ""))
+            self.assertEqual(runner.cgc_index().status, SidecarStatus.OK)
+            self.assertEqual(runner.last_command[0:5], ("cgc-test", "--database", "kuzudb", "--path", config.cgc_db_path))
+            callers = runner.cgc_callers("leaf", "src/sample.py")
+            self.assertEqual(callers.status, SidecarStatus.OK)
+            self.assertIn("callers", runner.last_command)
+            self.assertIn(str(Path(root).resolve() / "src" / "sample.py"), runner.last_command)
+            callees = runner.cgc_callees("root")
+            self.assertEqual(callees.status, SidecarStatus.OK)
+            self.assertIn("calls", runner.last_command)
+            self.assertEqual(runner.last_cwd, str(Path(root).resolve()))
+
+    def test_cgc_command_template_remains_supported(self):
         with tempfile.TemporaryDirectory() as root:
             config = SidecarConfig.from_environment(root, environ={
                 "SERENA_V8_CGC_COMMAND": "cgc query --project {workspace_root}",
@@ -74,14 +89,6 @@ class SidecarRunnerTests(unittest.TestCase):
             result = runner.cgc_query("find callers")
             self.assertEqual(result.status, SidecarStatus.OK)
             self.assertIn(str(Path(root).resolve()), runner.last_command)
-            self.assertEqual(runner.last_cwd, str(Path(root).resolve()))
-
-    def test_cgc_requires_explicit_command_template(self):
-        with tempfile.TemporaryDirectory() as root:
-            runner = SidecarRunner(SidecarConfig.from_environment(root, environ={}), executor=lambda *a, **k: (0, "", ""))
-            result = runner.cgc_query("find callers")
-            self.assertEqual(result.status, SidecarStatus.UNAVAILABLE)
-            self.assertIn("SERENA_V8_CGC_COMMAND", result.error)
 
     def test_result_is_json_serializable(self):
         with tempfile.TemporaryDirectory() as root:

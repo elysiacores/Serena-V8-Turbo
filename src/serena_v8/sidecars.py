@@ -1,11 +1,13 @@
 """Optional, workspace-scoped CGC and ast-grep sidecar adapters.
 
 The live Serena/LSP path remains the source of truth. Sidecars are invoked as
-bounded, read-only subprocesses and never own Workspace state.
+bounded subprocesses and never own Workspace state. CGC databases are keyed by
+the canonical Workspace path and stored outside the repository.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -32,6 +34,9 @@ class SidecarStatus(StrEnum):
 class SidecarConfig:
     workspace_root: str
     ast_grep_bin: str = "ast-grep"
+    cgc_bin: str = "cgc"
+    cgc_database: str = "kuzudb"
+    cgc_db_path: str = ""
     cgc_command: tuple[str, ...] = ()
     timeout_ms: int = 5000
     max_output_bytes: int = 5 * 1024 * 1024
@@ -46,20 +51,21 @@ class SidecarConfig:
             raise ValueError(f"Workspace root is not a directory: {root}")
         try:
             timeout_ms = int(env.get("SERENA_V8_SIDECAR_TIMEOUT_MS", "5000"))
-        except ValueError as exc:
-            raise ValueError("SERENA_V8_SIDECAR_TIMEOUT_MS must be an integer") from exc
-        timeout_ms = max(100, min(timeout_ms, 30_000))
-        try:
             max_output = int(env.get("SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES", str(5 * 1024 * 1024)))
         except ValueError as exc:
-            raise ValueError("SERENA_V8_SIDECAR_MAX_OUTPUT_BYTES must be an integer") from exc
+            raise ValueError("sidecar numeric settings must be integers") from exc
+        timeout_ms = max(100, min(timeout_ms, 30_000))
         max_output = max(1024, min(max_output, 50 * 1024 * 1024))
+        db_root = Path(env.get("SERENA_V8_CGC_DB_ROOT", str(Path.home() / ".serena-v8" / "cgc"))).expanduser()
+        workspace_id = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:24]
         command = env.get("SERENA_V8_CGC_COMMAND", "").strip()
-        cgc_command = tuple(shlex.split(command)) if command else ()
         return cls(
             workspace_root=str(root),
             ast_grep_bin=env.get("SERENA_V8_AST_GREP_BIN", "ast-grep"),
-            cgc_command=cgc_command,
+            cgc_bin=env.get("SERENA_V8_CGC_BIN", "cgc"),
+            cgc_database=env.get("SERENA_V8_CGC_DATABASE", "kuzudb"),
+            cgc_db_path=str((db_root / workspace_id).resolve()),
+            cgc_command=tuple(shlex.split(command)) if command else (),
             timeout_ms=timeout_ms,
             max_output_bytes=max_output,
         )
@@ -107,33 +113,41 @@ class SidecarRunner:
         if not language.strip():
             raise ValueError("language must not be empty")
         target = self._safe_path(path)
-        command = (
-            self.config.ast_grep_bin,
-            "run",
-            "--pattern",
-            pattern,
-            "--lang",
-            language,
-            str(target),
-        )
+        command = (self.config.ast_grep_bin, "run", "--pattern", pattern, "--lang", language, str(target))
         return self._run(SidecarKind.AST_GREP, command)
+
+    def cgc_index(self, force: bool = False, path: str = ".") -> SidecarResult:
+        target = self._safe_path(path)
+        command = self._cgc_prefix() + ("index", str(target), "--no-progress")
+        if force:
+            command += ("--force",)
+        return self._run(SidecarKind.CGC, command)
+
+    def cgc_callers(self, function: str, path: str | None = None) -> SidecarResult:
+        return self._cgc_relationship("callers", function, path)
+
+    def cgc_callees(self, function: str, path: str | None = None) -> SidecarResult:
+        return self._cgc_relationship("calls", function, path)
 
     def cgc_query(self, query: str) -> SidecarResult:
         if not query.strip():
             raise ValueError("query must not be empty")
-        if not self.config.cgc_command:
-            return SidecarResult(
-                kind=SidecarKind.CGC,
-                status=SidecarStatus.UNAVAILABLE,
-                workspace_root=self.config.workspace_root,
-                error="SERENA_V8_CGC_COMMAND is not configured",
-                timeout_ms=self.config.timeout_ms,
-            )
-        command = tuple(
-            part.replace("{workspace_root}", self.config.workspace_root)
-            for part in self.config.cgc_command
-        ) + (query,)
+        if self.config.cgc_command:
+            command = tuple(part.replace("{workspace_root}", self.config.workspace_root) for part in self.config.cgc_command) + (query,)
+        else:
+            command = self._cgc_prefix() + ("query", query)
         return self._run(SidecarKind.CGC, command)
+
+    def _cgc_relationship(self, operation: str, function: str, path: str | None) -> SidecarResult:
+        if not function.strip():
+            raise ValueError("function must not be empty")
+        command = self._cgc_prefix() + ("analyze", operation, function)
+        if path:
+            command += ("--file", str(self._safe_path(path)))
+        return self._run(SidecarKind.CGC, command)
+
+    def _cgc_prefix(self) -> tuple[str, ...]:
+        return (self.config.cgc_bin, "--database", self.config.cgc_database, "--path", self.config.cgc_db_path)
 
     def _safe_path(self, path: str) -> Path:
         candidate = Path(path).expanduser()
@@ -161,50 +175,26 @@ class SidecarRunner:
                 max_output_bytes=self.config.max_output_bytes,
             )
         except FileNotFoundError:
-            status = SidecarStatus.UNAVAILABLE
-            error = f"{kind.value} executable not found"
-            stdout = stderr = ""
+            status, error, stdout, stderr = SidecarStatus.UNAVAILABLE, f"{kind.value} executable not found", "", ""
         except TimeoutError as exc:
-            status = SidecarStatus.TIMEOUT
-            error = str(exc) or "sidecar request timed out"
-            stdout = stderr = ""
+            status, error, stdout, stderr = SidecarStatus.TIMEOUT, str(exc) or "sidecar request timed out", "", ""
         except OSError as exc:
-            status = SidecarStatus.FAILED
-            error = f"could not start sidecar: {exc}"
-            stdout = stderr = ""
+            status, error, stdout, stderr = SidecarStatus.FAILED, f"could not start sidecar: {exc}", "", ""
         else:
             status = SidecarStatus.OK if returncode == 0 else SidecarStatus.FAILED
             error = "" if returncode == 0 else f"sidecar exited with code {returncode}"
-        return SidecarResult(
-            kind=kind,
-            status=status,
-            workspace_root=self.config.workspace_root,
-            stdout=stdout[: self.config.max_output_bytes],
-            stderr=stderr[: self.config.max_output_bytes],
-            error=error,
-            duration_ms=(time.monotonic() - started) * 1000,
-            timeout_ms=self.config.timeout_ms,
-        )
+        return SidecarResult(kind, status, self.config.workspace_root, stdout[:self.config.max_output_bytes], stderr[:self.config.max_output_bytes], error, (time.monotonic() - started) * 1000, self.config.timeout_ms)
 
     @staticmethod
     def _execute(command: Sequence[str], *, cwd: str, timeout: float, max_output_bytes: int) -> tuple[int, str, str]:
         try:
-            completed = subprocess.run(
-                list(command),
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            completed = subprocess.run(list(command), cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError(f"sidecar exceeded {timeout * 1000:.0f} ms deadline") from exc
         return completed.returncode, completed.stdout[:max_output_bytes], completed.stderr[:max_output_bytes]
 
 
 def runner_for_workspace(workspace_root: str) -> SidecarRunner:
-    """Create a new sidecar runner; no state is shared between Workspaces."""
     return SidecarRunner(SidecarConfig.from_environment(workspace_root))
 
 
