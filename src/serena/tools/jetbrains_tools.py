@@ -3,14 +3,18 @@ from collections import Counter
 from typing import Any, Literal
 
 import serena.jetbrains.jetbrains_types as jb
-from serena.code_editor import JetBrainsCodeEditor
-from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
 from serena.jetbrains.jetbrains_types import SymbolDTO, SymbolDTOUtil
 from serena.symbol import JetBrainsSymbolDictGrouper
 from serena.tools import Tool, ToolMarkerBeta, ToolMarkerOptional, ToolMarkerSymbolicEdit, ToolMarkerSymbolicRead
 from serena.util.text_utils import find_text_coordinates
 
 log = logging.getLogger(__name__)
+
+
+def _jetbrains_client(project):
+    from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClient
+
+    return JetBrainsPluginClient.from_project(project)
 
 
 class JetBrainsFindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
@@ -98,7 +102,7 @@ class JetBrainsFindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
         if relative_path is not None and relative_path.startswith(jb.JB_EXTERNAL_FILE_PREFIX):
             search_deps = True
 
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             if include_body:
                 include_quick_info = False
                 include_documentation = False
@@ -182,7 +186,7 @@ class JetBrainsMoveTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, ToolMa
         target_relative_path = target_relative_path or None
         target_parent_name_path = target_parent_name_path or None
         relative_path = self._sanitize_input_param(relative_path)
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             response_dict = client.move(
                 name_path=name_path,
                 relative_path=relative_path,
@@ -222,7 +226,7 @@ class JetBrainsSafeDeleteTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, 
         """
         relative_path = self._sanitize_input_param(relative_path)
         name_path = name_path or None
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             response_dict = client.safe_delete(
                 name_path=name_path,
                 relative_path=relative_path,
@@ -256,7 +260,7 @@ class JetBrainsInlineSymbol(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional, To
             May be ignored in some cases (e.g. when inlining a class).
         """
         relative_path = self._sanitize_input_param(relative_path)
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             response_dict = client.inline_symbol(
                 name_path=name_path,
                 relative_path=relative_path,
@@ -290,7 +294,7 @@ class JetBrainsFindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead, ToolMark
         :param max_answer_chars: max characters for the result (-1 for default). If exceeded, no content/a shortened result is returned.
         """
         relative_path = self._sanitize_input_param(relative_path)
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             response_dict = client.find_references(
                 name_path=name_path,
                 relative_path=relative_path,
@@ -362,7 +366,7 @@ class JetBrainsGetSymbolsOverviewTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOp
                 depth = 0
 
         relative_path = self._sanitize_input_param(relative_path)
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             symbol_overview = client.get_symbols_overview(
                 relative_path=relative_path, depth=depth, include_file_documentation=include_file_documentation
             )
@@ -465,7 +469,7 @@ class JetBrainsTypeHierarchyTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptiona
         :return: Compact JSON with file-grouped hierarchy. Error string if not applicable.
         """
         relative_path = self._sanitize_input_param(relative_path)
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             subtypes = None
             supertypes = None
             levels_not_included = {}
@@ -526,7 +530,7 @@ class JetBrainsFindDeclarationTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptio
         content = editor.read_file(relative_path)
         coords = find_text_coordinates(content, regex, require_unique=True)
         assert coords is not None
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             symbol_collection = client.find_declaration(
                 relative_path=relative_path, line=coords.line, col=coords.col, include_quick_info=False, include_body=include_body
             )
@@ -546,7 +550,7 @@ class JetBrainsFindImplementationsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerO
         :param relative_path: the relative path to the source file containing the symbol for which to find implementations.
         :param name_path: name path of the symbol for which to find implementations
         """
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             symbol_collection = client.find_implementations(
                 relative_path=relative_path,
                 name_path=name_path,
@@ -582,6 +586,8 @@ class JetBrainsRenameTool(Tool, ToolMarkerSymbolicEdit, ToolMarkerOptional):
         :param rename_in_text_occurrences: whether to also rename occurrences in text. Default True.
         :return: a status message
         """
+        from serena.code_editor import JetBrainsCodeEditor
+
         code_editor = JetBrainsCodeEditor(self.project)
         result = code_editor.rename_symbol(
             name_path=name_path,
@@ -615,7 +621,7 @@ class JetBrainsDebugTool(Tool, ToolMarkerOptional, ToolMarkerBeta):
         :param repl_key: identifier for the REPL instance. State persists across calls with the same key.
         :return: string representation of the result
         """
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             if expression:
                 response = client.debug_eval(repl_key=repl_key, expression=expression)
             else:
@@ -653,7 +659,7 @@ class JetBrainsRunInspectionsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOption
             -1 means the default value from the config will be used.
         :return: JSON string with inspection results including severity, message, and location.
         """
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             response_dict = client.run_inspections(
                 relative_path=relative_path,
                 min_severity=min_severity,
@@ -687,7 +693,7 @@ class JetBrainsListInspectionsTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptio
             -1 means the default value from the config will be used.
         :return: JSON string with the list of available inspections including name, group path, and language.
         """
-        with JetBrainsPluginClient.from_project(self.project) as client:
+        with _jetbrains_client(self.project) as client:
             response_dict = client.list_inspections(
                 language=language,
                 group_path_contains=group_path_contains,

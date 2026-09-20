@@ -21,6 +21,8 @@ from concurrent.futures import Future
 V8_SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(V8_SRC))
 
+from serena_v8._version import VERSION
+
 
 class V8IntegrationTest:
     """Integration test harness for V8."""
@@ -38,7 +40,7 @@ class V8IntegrationTest:
         
         checks = {
             "name": identity.get("name") == "Serena V8",
-            "version": identity.get("version") == "8.0.0a1",
+            "version": identity.get("version") == VERSION,
             "has_commit": bool(identity.get("commit")),
             "has_runtime_path": bool(identity.get("runtime_path")),
         }

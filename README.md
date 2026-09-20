@@ -2,7 +2,7 @@
 
 > **A performance and stability fork of Serena, rebuilt for fast MCP coding workflows, predictable installs, and production-grade semantic editing.**
 
-[![Release](https://img.shields.io/badge/release-8.0.0a1-111827)](https://github.com/elysiacores/Serena-V8-Turbo)
+[![Release](https://img.shields.io/badge/release-8.0.0a2-111827)](https://github.com/elysiacores/Serena-V8-Turbo)
 [![Python](https://img.shields.io/badge/Python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-7C3AED)](https://modelcontextprotocol.io/)
 [![Tests](https://img.shields.io/badge/regression-73%2F73_passed-16A34A)](./tests)
@@ -166,7 +166,7 @@ The wheel metadata, `serena.__version__`, `serena_v8.__version__`, runtime ident
 Current release:
 
 ```text
-Serena 8.0.0a1
+Serena 8.0.0a2
 ```
 
 No more “package manager says 1.7 but the files are secretly V8”.
@@ -375,7 +375,7 @@ No upstream Serena installation is required. The default Python/Jedi semantic ba
 For a reproducible install, pin the release tag:
 
 ```bash
-uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a1'
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a2'
 ```
 
 Use the untagged repository URL only when you intentionally want the latest `main` development build.
@@ -391,7 +391,7 @@ uv tool list
 Expected:
 
 ```text
-Serena 8.0.0a1
+Serena 8.0.0a2
 ```
 
 ### Install from a local checkout
@@ -408,7 +408,7 @@ SERENA_V8_SOURCE=. ./scripts/install-v8.sh
 Install the target release tag explicitly:
 
 ```bash
-uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a1'
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a2'
 serena-v8-doctor
 ```
 
@@ -424,7 +424,7 @@ serena --version
 To return to this V8 release:
 
 ```bash
-uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a1'
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a2'
 ```
 
 > **Do not manually copy V8 files into `site-packages`. Do not install a legacy `serena-v8` distribution beside `serena-agent`.**
@@ -512,21 +512,21 @@ Do not silently broaden a running workspace just because a new repository appear
 
 ### Current optimized baseline
 
-Measured on this repository with the project-local `.venv/bin/serena` (`8.0.0a1`) and correctness-gated MCP calls. Treat these as a reproducible local baseline, not universal hardware guarantees.
+Measured on this repository with the project-local `.venv/bin/serena` (`8.0.0a2`) and correctness-gated MCP calls. Treat these as a reproducible local baseline, not universal hardware guarantees.
 
 | Workload | Startup | Cold / first call | Warm p50 | Warm p95 |
 |---|---:|---:|---:|---:|
-| `list_dir` (repo root) | 991.8 ms | — | 7.8 ms | 15.8 ms |
-| `find_symbol` | 978.0 ms | — | 3.3 ms | 6.1 ms |
-| `find_referencing_symbols` | 977.5 ms | — | 6.2 ms | 8.6 ms |
-| `search_for_pattern` (`src`) | 978.4 ms | — | 76.1 ms | 84.3 ms |
-| `get_symbols_overview` | 987.6 ms | — | 4.2 ms | 5.7 ms |
+| `list_dir` (repo root) | 1118.1 ms | 8.4 ms | 4.4 ms | 4.6 ms |
+| `find_symbol` | 956.2 ms | 625.2 ms | 3.7 ms | 3.9 ms |
+| `find_referencing_symbols` | 941.5 ms | 886.7 ms | 7.2 ms | 8.9 ms |
+| `search_for_pattern` (`src`) | 944.6 ms | 49.9 ms | 47.5 ms | 49.3 ms |
+| `get_symbols_overview` | 941.4 ms | — | 4.3 ms | 5.0 ms |
 | `get_diagnostics_for_file` | — | 1628.2 ms | 5.7 ms | 7.2 ms |
 | `ast_grep_search` | 976.5 ms | 26.5 ms | 26.3 ms | 41.3 ms |
 | `cgc_query` | 976.2 ms | 1447.8 ms | 3.2 ms | 3.7 ms |
 | `cgc_callers` | 1001.4 ms | 1510.5 ms | 3.3 ms | 4.4 ms |
 
-Freshness polling over 2,000 files measures **6.97 ms p50 / 7.13 ms p95** while still detecting same-size edits with preserved mtimes.
+Freshness polling over 2,000 files measures **7.13 ms p50 / 8.04 ms p95** while still detecting same-size edits with preserved mtimes.
 
 The largest root-cause fixes behind this baseline are structural rather than timeout tuning:
 
@@ -534,6 +534,8 @@ The largest root-cause fixes behind this baseline are structural rather than tim
 - Python/Jedi no longer pays SolidLSP's generic 2-second cross-file sleep because `jedi-language-server` resolves references synchronously;
 - language-server reverse lookup binds the already-selected implementation, reducing `get_ls_class()` resolution during Python/Jedi startup from 107 calls to 1 instead of importing unrelated language-server implementations;
 - optional usage telemetry runs off the MCP critical startup path, so a network request cannot block readiness;
+- optional HTTP/GUI/JetBrains/project-query stacks are imported on demand instead of during LSP startup, reducing cold semantic latency and RSS without removing features;
+- Git repository status is collected with one porcelain-v2 Git process instead of four subprocesses;
 - CGC gateway processes share the MCP process group, are explicitly closed on graceful stdio shutdown, and no longer survive as orphan processes holding the embedded Kùzu database lock;
 - `v8_quick_bench.py` and `v8_warm_bench.py` delegate to the same correctness-gated suite, eliminating stale tool schemas and accidental benchmarking of a different Serena executable.
 
@@ -548,7 +550,7 @@ python benchmarks/mcp_latency_benchmark.py \
   --arguments '{"name_path_pattern":"SmartScheduler","relative_path":"src/serena_v8/scheduler.py"}' \
   --rounds 10 \
   --executable "$(command -v serena)" \
-  --expected-version 8.0.0a1 \
+  --expected-version 8.0.0a2 \
   --expect-contains SmartScheduler
 ```
 
@@ -558,7 +560,7 @@ python benchmarks/mcp_latency_benchmark.py \
 python benchmarks/performance_suite.py \
   --project "$PWD" \
   --executable "$(command -v serena)" \
-  --expected-version 8.0.0a1 \
+  --expected-version 8.0.0a2 \
   --rounds 5
 ```
 
@@ -725,7 +727,7 @@ tests/                      # V8 regression and safety coverage
 
 ## Status
 
-**Current release: `8.0.0a1`**
+**Current release: `8.0.0a2`**
 
 The current release has been validated for:
 

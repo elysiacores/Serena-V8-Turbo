@@ -51,31 +51,67 @@ class V8LspStartupOwnershipTests(unittest.TestCase):
         self.assertEqual(create_count, 1)
         self.assertTrue(all(result is manager for result in results))
 
-    def test_agent_activation_uses_idempotent_lsp_startup(self) -> None:
+    def test_agent_activation_defers_lsp_startup_by_default(self) -> None:
         ensure = Mock(return_value=object())
-        project = SimpleNamespace(ensure_language_server_manager=ensure)
+        project = SimpleNamespace(ensure_language_server_manager=ensure, project_name="test")
         agent = object.__new__(SerenaAgent)
         agent._gui_log_viewer = None
         agent._dashboard_manager = None
         agent._active_project = project
         agent.get_language_backend = lambda: SimpleNamespace(is_lsp=lambda: True, is_jetbrains=lambda: False)  # type: ignore[method-assign]
 
-        with patch.dict(os.environ, {"SERENA_V8_SKIP_PREWARM": "0"}):
+        with patch.dict(
+            os.environ,
+            {
+                "SERENA_V8_SKIP_PREWARM": "0",
+                "SERENA_V8_EAGER_LSP_STARTUP": "0",
+                "SERENA_V8_SEMANTIC_PREWARM": "0",
+            },
+        ):
+            agent._init_active_project_language_backend()
+
+        ensure.assert_not_called()
+        agent._active_project = None
+
+    def test_explicit_eager_startup_uses_idempotent_manager_path(self) -> None:
+        ensure = Mock(return_value=object())
+        project = SimpleNamespace(ensure_language_server_manager=ensure, project_name="test")
+        agent = object.__new__(SerenaAgent)
+        agent._gui_log_viewer = None
+        agent._dashboard_manager = None
+        agent._active_project = project
+        agent.get_language_backend = lambda: SimpleNamespace(is_lsp=lambda: True, is_jetbrains=lambda: False)  # type: ignore[method-assign]
+
+        with patch.dict(
+            os.environ,
+            {
+                "SERENA_V8_SKIP_PREWARM": "0",
+                "SERENA_V8_EAGER_LSP_STARTUP": "1",
+                "SERENA_V8_SEMANTIC_PREWARM": "0",
+            },
+        ):
             agent._init_active_project_language_backend()
 
         ensure.assert_called_once_with()
         agent._active_project = None
 
-    def test_skip_prewarm_defers_lsp_startup(self) -> None:
+    def test_skip_prewarm_overrides_eager_modes(self) -> None:
         ensure = Mock(return_value=object())
-        project = SimpleNamespace(ensure_language_server_manager=ensure)
+        project = SimpleNamespace(ensure_language_server_manager=ensure, project_name="test")
         agent = object.__new__(SerenaAgent)
         agent._gui_log_viewer = None
         agent._dashboard_manager = None
         agent._active_project = project
         agent.get_language_backend = lambda: SimpleNamespace(is_lsp=lambda: True, is_jetbrains=lambda: False)  # type: ignore[method-assign]
 
-        with patch.dict(os.environ, {"SERENA_V8_SKIP_PREWARM": "1"}):
+        with patch.dict(
+            os.environ,
+            {
+                "SERENA_V8_SKIP_PREWARM": "1",
+                "SERENA_V8_EAGER_LSP_STARTUP": "1",
+                "SERENA_V8_SEMANTIC_PREWARM": "1",
+            },
+        ):
             agent._init_active_project_language_backend()
 
         ensure.assert_not_called()

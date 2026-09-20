@@ -2,8 +2,6 @@ import json
 import os
 
 from serena.config.serena_config import LanguageBackend
-from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClientManager
-from serena.project_server import ProjectServerClient
 from serena.tools import Tool, ToolMarkerDoesNotRequireActiveProject, ToolMarkerOptional
 
 
@@ -61,6 +59,8 @@ class ListQueryableProjectsTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequi
         if symbol_access:
             backend = self.agent.get_language_backend()
             if backend.is_jetbrains():
+                from serena.jetbrains.jetbrains_plugin_client import JetBrainsPluginClientManager
+
                 # projects with open IDE instances can be queried
                 matched_clients = JetBrainsPluginClientManager().match_clients(registered_projects)
                 relevant_projects = [mc.registered_project for mc in matched_clients]
@@ -93,6 +93,8 @@ class QueryProjectTool(Tool, ToolMarkerOptional, ToolMarkerDoesNotRequireActiveP
         tool = self.agent.get_tool_by_name(tool_name)
         assert tool.is_readonly(), f"Tool {tool_name} is not read-only and cannot be executed in another project."
         if self._is_project_server_required(tool):
+            from serena.project_server import ProjectServerClient
+
             client = ProjectServerClient()
             registered_project = _resolve_registered_project(self.agent, project_name)
             query_target = str(registered_project.project_root) if registered_project is not None else project_name

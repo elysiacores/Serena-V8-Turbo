@@ -375,11 +375,9 @@ class SerenaMCPFactory:
                 config.language_backend = language_backend
 
             self.agent = self._create_serena_agent(config, modes=mode_selection_def, project_activation_error=project_activation_error)
-            # Project activation already owns eager LSP startup. Do not launch a
-            # second manager here: duplicate startup can race with activation and
-            # restart a manager that has just become ready. Explicit semantic
-            # prewarm is synchronous by design so opting in truly moves that cost
-            # into startup instead of competing with the first semantic request.
+            # LSP startup is lazy by default. Explicit semantic prewarm is
+            # synchronous by design, so opting in intentionally moves that cost
+            # into startup instead of the first semantic request.
             agent_project = self.agent.get_active_project()
             if (
                 agent_project is not None
@@ -387,7 +385,7 @@ class SerenaMCPFactory:
                 and os.environ.get("SERENA_V8_SEMANTIC_PREWARM", "0") == "1"
             ):
                 try:
-                    manager = agent_project.get_language_server_manager_or_raise()
+                    manager = agent_project.ensure_language_server_manager()
                     candidates = agent_project.gather_source_files()
                     warmed = manager.prewarm_semantic(candidates)
                     log.info("V8 semantic prewarm completed for %s", warmed or "no suitable source file")

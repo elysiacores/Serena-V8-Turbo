@@ -18,8 +18,6 @@ from enum import Enum
 from logging import Logger
 from typing import TYPE_CHECKING, Optional, TypeVar
 
-import requests
-import webview
 from sensai.util import logging
 from sensai.util.helper import mark_used
 from sensai.util.logging import LogTime
@@ -40,8 +38,6 @@ from serena.config.serena_config import (
     SerenaPaths,
     ToolInclusionDefinition,
 )
-from serena.dashboard import SerenaDashboardAPI, SerenaDashboardTrayManager, SerenaDashboardViewer, open_url_in_browser
-from serena.jetbrains import jetbrains_plugin_client
 from serena.ls_manager import LanguageServerManager
 from serena.memories.memory_manager import MemoryManager
 from serena.project import Project
@@ -397,8 +393,12 @@ class DashboardManager:
             :return: whether the mode is supported on the current platform
             """
             if self == DashboardManager.Mode.WEBVIEW:
+                from serena.dashboard import SerenaDashboardViewer
+
                 return SerenaDashboardViewer.is_current_platform_supported()
             elif self == DashboardManager.Mode.TRAY_MANAGER:
+                from serena.dashboard import SerenaDashboardTrayManager
+
                 return SerenaDashboardTrayManager.is_current_platform_supported()
             else:
                 return True
@@ -457,6 +457,8 @@ class DashboardManager:
                         self.open_dashboard_in_browser()
 
     def open_dashboard_in_browser(self) -> None:
+        from serena.dashboard import open_url_in_browser
+
         open_url_in_browser(self.url, use_subprocess=True)
 
     @staticmethod
@@ -464,6 +466,9 @@ class DashboardManager:
         """
         Main function of the subprocess for starting the dashboard viewer
         """
+        from serena.dashboard import SerenaDashboardViewer, open_url_in_browser
+        import webview
+
         try:
             SerenaDashboardViewer(url, start_minimized=minimized, parent_process_id=parent_process_id).run()
         except webview.errors.WebViewException as e:
@@ -495,6 +500,8 @@ class DashboardManager:
 
         :param open_on_launch: whether the dashboard should be opened immediately
         """
+        from serena.dashboard import SerenaDashboardTrayManager
+
         with LogTime("Dashboard tray manager initialisation"):
             with self._tray_manager_lock:
                 # ensure the singleton tray manager process is running
@@ -522,6 +529,8 @@ class DashboardManager:
             self._dashboard_viewer_process = None
 
         if self._mode == self.Mode.TRAY_MANAGER:
+            from serena.dashboard import SerenaDashboardTrayManager
+
             with self._tray_manager_lock:
                 SerenaDashboardTrayManager.unregister_instance(port=self._port)
 
@@ -532,6 +541,8 @@ class DashboardManager:
         :param active_project: the currently active project or None if no project is active
         """
         if self._mode == self.Mode.TRAY_MANAGER:
+            from serena.dashboard import SerenaDashboardTrayManager
+
             with self._tray_manager_lock:
                 project_name = active_project.project_name if active_project is not None else None
                 SerenaDashboardTrayManager.update_project(port=self._port, project=project_name)
@@ -574,9 +585,6 @@ class SerenaAgent:
 
         # obtain serena configuration using the decoupled factory function
         self.serena_config = serena_config or SerenaConfig.from_config_file()
-
-        # propagate configuration to other components
-        self.serena_config.propagate_settings()
 
         # determine registered project to be activated (if any)
         registered_project_to_activate: RegisteredProject | None = (
@@ -651,6 +659,8 @@ class SerenaAgent:
             project_config=registered_project_to_activate.project_config if registered_project_to_activate is not None else None,
             log_choice=True,
         )
+        if self._language_backend.is_jetbrains():
+            self.serena_config.propagate_settings()
 
         # create the tool names mapping for prompts
         self._prompt_tool_names_mapping = self._create_prompt_tool_names_mapping(self._language_backend)
@@ -687,8 +697,10 @@ class SerenaAgent:
         self._update_active_tools()
 
         # create the dashboard backend (if enabled), which will register callback.
-        dashboard_api: SerenaDashboardAPI | None = None
+        dashboard_api = None
         if self.serena_config.web_dashboard:
+            from serena.dashboard import SerenaDashboardAPI
+
             dashboard_api = SerenaDashboardAPI(
                 get_memory_log_handler(),
                 tool_names,
@@ -742,6 +754,8 @@ class SerenaAgent:
             "context": self._context.name,
         }
         try:
+            import requests
+
             requests.get("https://oraios-software.de/serena_usage.php", params=params, timeout=1)
         except Exception as e:
             log.debug(f"Failed to send usage info: {e}")
@@ -1329,22 +1343,33 @@ class SerenaAgent:
             log.exception(f"Unexpected error running activation_command for project '{project.project_name}'")
 
     def _init_active_project_language_backend(self) -> None:
-        """
-        Initialises the active project's language backend
+        """Initialise the active project's language backend.
+
+        LSP startup is lazy by default. Project activation runs this method in a
+        background task; starting a language server here races with the MCP
+        initialize handshake for CPU and I/O, making both readiness and the
+        combined startup-plus-first-semantic path slower. Semantic tools already
+        use the project's idempotent lazy startup path, so eager LSP startup is
+        reserved for explicit opt-in/prewarm modes.
         """
         project = self._active_project
         assert project is not None
 
-        # for LSP mode, start the language server manager
         if self.get_language_backend().is_lsp():
-            if os.environ.get("SERENA_V8_SKIP_PREWARM") == "1":
-                log.debug("Skipping eager language-server initialization; semantic tools will initialize lazily")
+            skip_eager = os.environ.get("SERENA_V8_SKIP_PREWARM") == "1"
+            eager_startup = (
+                os.environ.get("SERENA_V8_EAGER_LSP_STARTUP", "0") == "1"
+                or os.environ.get("SERENA_V8_SEMANTIC_PREWARM", "0") == "1"
+            )
+            if skip_eager or not eager_startup:
+                log.debug("Deferring language-server initialization until the first semantic request")
                 return
             with LogTime("Language server initialization", logger=log):
                 project.ensure_language_server_manager()
 
-        # for JetBrains mode, search for plugin server and spawn IDE (if not found and launch command provided)
         elif self.get_language_backend().is_jetbrains():
+            from serena.jetbrains import jetbrains_plugin_client
+
             try:
                 client = jetbrains_plugin_client.JetBrainsPluginClient.from_project(project, log_warning=False)
                 log.info("Found Serena JetBrains Plugin server: %s", client)

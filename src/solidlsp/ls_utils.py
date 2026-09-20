@@ -20,7 +20,6 @@ from typing import Literal, cast
 from urllib.parse import urlparse
 
 import charset_normalizer
-import requests
 
 from solidlsp.ls_exceptions import InvalidTextLocationError, SolidLSPException
 from solidlsp.ls_types import UnifiedSymbolInformation
@@ -453,8 +452,10 @@ class FileUtils:
         target_directory = os.path.dirname(target_path) or "."
         os.makedirs(target_directory, exist_ok=True)
         temp_file_path = str(PurePath(target_directory, f".{Path(target_path).name}.{uuid.uuid4().hex}.download"))
-        response: requests.Response | None = None
+        response = None
         try:
+            import requests
+
             response = requests.get(url, stream=True, timeout=60)
             if response.status_code != 200:
                 log.error(f"Error downloading file '{url}': {response.status_code} {response.text}")
