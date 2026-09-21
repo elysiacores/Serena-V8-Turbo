@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import subprocess
 import unittest
 from pathlib import Path
@@ -56,6 +57,17 @@ class WatchdogHealthTests(unittest.TestCase):
             mcp_running=True,
         )
         self.assertTrue(result["ok"], result)
+
+    def test_serena_dev_tunnel_is_monitored(self):
+        self.assertEqual(self.module.TUNNEL_PORTS["serena-v8-dev-tunnel.service"], 8792)
+
+    def test_serena_dev_tunnel_has_default_functional_probe(self):
+        expected = str(SCRIPT.parents[1])
+        self.assertEqual(self.module.MCP_PROBE_PROJECTS["serena-v8-dev-tunnel.service"], expected)
+
+    def test_functional_probe_timeout_is_bounded(self):
+        timeout = inspect.signature(self.module.Watchdog.functional_probe).parameters["timeout"].default
+        self.assertEqual(timeout, 45.0)
 
     def test_zero_metric_is_reported_as_zero_age(self):
         watchdog = self.module.Watchdog()

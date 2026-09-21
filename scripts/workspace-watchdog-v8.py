@@ -23,24 +23,30 @@ FUNCTIONAL_PROBE_INTERVAL_SECONDS = 300
 LOG_DIR = Path.home() / ".serena-v8" / "logs"
 
 def _load_probe_projects() -> dict[str, str]:
-    """Load optional probe targets from user-owned configuration."""
+    """Load functional-probe targets, keeping the Serena V8 dev tunnel covered by default."""
+    defaults = {
+        "serena-v8-dev-tunnel.service": str(Path(__file__).resolve().parents[1]),
+    }
     raw = os.environ.get("SERENA_V8_PROBE_PROJECTS_JSON", "{}")
     try:
         value = json.loads(raw)
     except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
+        return defaults
+    if not isinstance(value, dict):
+        return defaults
+    return {**defaults, **value}
 
 
 MCP_PROBE_PROJECTS = _load_probe_projects()
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 TUNNEL_PORTS = {
-    "workspace-a-tunnel.service": 8787,
-    "workspace-b-tunnel.service": 8788,
-    "workspace-c-tunnel.service": 8789,
-    "workspace-d-tunnel.service": 8790,
-    "workspace-e-tunnel.service": 8791,
+    "inspi365-tunnel.service": 8787,
+    "tp-tunnel.service": 8788,
+    "tummun-tunnel.service": 8789,
+    "makinni-tunnel.service": 8790,
+    "tpos-tunnel.service": 8791,
+    "serena-v8-dev-tunnel.service": 8792,
 }
 
 log = logging.getLogger("v8-watchdog")
@@ -150,7 +156,7 @@ class Watchdog:
         except Exception:
             return None
 
-    def functional_probe(self, project: str, timeout: float = 180.0) -> dict:
+    def functional_probe(self, project: str, timeout: float = 45.0) -> dict:
         """Exercise initialize, tools/list, and list_dir over real stdio MCP."""
         command = [
             os.environ.get("SERENA_V8_SERENA_BIN", "serena"), "start-mcp-server", "--transport", "stdio",
