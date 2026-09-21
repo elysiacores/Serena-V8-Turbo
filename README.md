@@ -2,10 +2,10 @@
 
 > **A performance and stability fork of Serena, rebuilt for fast MCP coding workflows, predictable installs, and production-grade semantic editing.**
 
-[![Release](https://img.shields.io/badge/release-8.0.0a2-111827)](https://github.com/elysiacores/Serena-V8-Turbo)
+[![Release](https://img.shields.io/badge/release-8.0.0a3-111827)](https://github.com/elysiacores/Serena-V8-Turbo)
 [![Python](https://img.shields.io/badge/Python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-7C3AED)](https://modelcontextprotocol.io/)
-[![Tests](https://img.shields.io/badge/regression-73%2F73_passed-16A34A)](./tests)
+[![Tests](https://img.shields.io/badge/regression-107%2F107_passed-16A34A)](./tests)
 ![License](https://img.shields.io/badge/license-MIT-2563EB)
 
 Serena V8 Turbo starts from [Serena](https://github.com/oraios/serena) and pushes the runtime in a different direction: lower latency, safer edits, deterministic packaging, bounded concurrency, measurable performance, and fewer “works on my machine” surprises.
@@ -166,7 +166,7 @@ The wheel metadata, `serena.__version__`, `serena_v8.__version__`, runtime ident
 Current release:
 
 ```text
-Serena 8.0.0a2
+Serena 8.0.0a3
 ```
 
 No more “package manager says 1.7 but the files are secretly V8”.
@@ -375,7 +375,7 @@ No upstream Serena installation is required. The default Python/Jedi semantic ba
 For a reproducible install, pin the release tag:
 
 ```bash
-uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a2'
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a3'
 ```
 
 Use the untagged repository URL only when you intentionally want the latest `main` development build.
@@ -391,7 +391,7 @@ uv tool list
 Expected:
 
 ```text
-Serena 8.0.0a2
+Serena 8.0.0a3
 ```
 
 ### Install from a local checkout
@@ -408,7 +408,7 @@ SERENA_V8_SOURCE=. ./scripts/install-v8.sh
 Install the target release tag explicitly:
 
 ```bash
-uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a2'
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a3'
 serena-v8-doctor
 ```
 
@@ -424,7 +424,7 @@ serena --version
 To return to this V8 release:
 
 ```bash
-uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a2'
+uv tool install --force 'git+https://github.com/elysiacores/Serena-V8-Turbo.git@v8.0.0a3'
 ```
 
 > **Do not manually copy V8 files into `site-packages`. Do not install a legacy `serena-v8` distribution beside `serena-agent`.**
@@ -512,7 +512,7 @@ Do not silently broaden a running workspace just because a new repository appear
 
 ### Current optimized baseline
 
-Measured on this repository with the project-local `.venv/bin/serena` (`8.0.0a2`) and correctness-gated MCP calls. Treat these as a reproducible local baseline, not universal hardware guarantees.
+Measured on this repository with the project-local `.venv/bin/serena` (`8.0.0a3`) and correctness-gated MCP calls. Treat these as a reproducible local baseline, not universal hardware guarantees.
 
 | Workload | Startup | Cold / first call | Warm p50 | Warm p95 |
 |---|---:|---:|---:|---:|
@@ -550,7 +550,7 @@ python benchmarks/mcp_latency_benchmark.py \
   --arguments '{"name_path_pattern":"SmartScheduler","relative_path":"src/serena_v8/scheduler.py"}' \
   --rounds 10 \
   --executable "$(command -v serena)" \
-  --expected-version 8.0.0a2 \
+  --expected-version 8.0.0a3 \
   --expect-contains SmartScheduler
 ```
 
@@ -560,7 +560,7 @@ python benchmarks/mcp_latency_benchmark.py \
 python benchmarks/performance_suite.py \
   --project "$PWD" \
   --executable "$(command -v serena)" \
-  --expected-version 8.0.0a2 \
+  --expected-version 8.0.0a3 \
   --rounds 5
 ```
 
@@ -727,7 +727,7 @@ tests/                      # V8 regression and safety coverage
 
 ## Status
 
-**Current release: `8.0.0a2`**
+**Current release: `8.0.0a3`**
 
 The current release has been validated for:
 
